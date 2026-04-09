@@ -58,11 +58,13 @@ def get_match_key(texto):
 
 @st.cache_data(ttl=300)
 def load_all_data():
-    # 1. CARGAR CATÁLOGO
+    # 1. CARGAR CATÁLOGO (Saltando las 2 primeras filas de títulos)
     try:
-        df_cat = pd.read_csv(URL_CATALOGO)
+        df_cat = pd.read_csv(URL_CATALOGO, skiprows=2)
         df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
         df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
+        # Eliminar filas completamente vacías
+        df_cat = df_cat.dropna(how='all')
     except Exception as e:
         st.error(f"Error al cargar el Catálogo de Matrices: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -390,9 +392,14 @@ if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_containe
 with st.spinner("Conectando con base de datos SQL y Google Sheets..."):
     try:
         df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
-        datos_listos = not df_cat_raw.empty
+        
+        if df_cat_raw.empty or '<!DOCTYPE html>' in str(df_cat_raw.columns):
+            st.error("🚨 Error de Lectura: El Google Sheets no se pudo descargar. Verifica los permisos o el formato del archivo.")
+            datos_listos = False
+        else:
+            datos_listos = True
     except Exception as e:
-        st.error(f"Error crítico durante la extracción: {e}")
+        st.error(f"🚨 Error crítico durante la extracción: {e}")
         datos_listos = False
 
 if datos_listos:
@@ -400,45 +407,53 @@ if datos_listos:
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.info("El sistema está cruzando el catálogo (Solo RH) con el historial acumulado desde SQL.")
+        st.info("El sistema está cruzando el catálogo (Solo RH) con el historial acumulado desde SQL mediante extracción inteligente de código.")
         
     with col2:
         if st.button("⚙️ Procesar Datos de Matrices", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices..."):
-                df_res = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
-                st.session_state['df_res'] = df_res
+                
+                col_rh_existe = any('RH' in c.upper() for c in df_cat_raw.columns)
+                
+                if not col_rh_existe:
+                    st.error(f"❌ No se encontró la columna 'RH' en el Catálogo. Columnas leídas: {list(df_cat_raw.columns)}")
+                else:
+                    df_res = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
+                    st.session_state['df_res'] = df_res
 
-    if 'df_res' in st.session_state and not st.session_state['df_res'].empty:
+    if 'df_res' in st.session_state:
         df_res = st.session_state['df_res']
         
-        rojos = len(df_res[df_res['COLOR']=='ROJO'])
-        amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
-        verdes = len(df_res[df_res['COLOR']=='VERDE'])
-        
-        st.write("---")
-        st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
-        
-        col_desc1, col_desc2 = st.columns(2)
-        
-        h = datetime.utcnow() - timedelta(hours=3)
-        fecha_str = h.strftime('%d%m%Y')
-        
-        with col_desc1:
-            pdf_main_data = build_pdf_main(df_res)
-            st.download_button(
-                label="📥 Descargar Reporte Principal", 
-                data=pdf_main_data, 
-                file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
-                mime="application/pdf", 
-                use_container_width=True
-            )
+        if not df_res.empty:
+            rojos = len(df_res[df_res['COLOR']=='ROJO'])
+            amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
+            verdes = len(df_res[df_res['COLOR']=='VERDE'])
             
-        with col_desc2:
-            pdf_resumen_data = build_pdf_resumen(df_res)
-            st.download_button(
-                label="📊 Descargar Resumen General (Tabla y Gráficos)", 
-                data=pdf_resumen_data, 
-                file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
-                mime="application/pdf", 
-                use_container_width=True
-            )
+            st.write("---")
+            st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
+            
+            col_desc1, col_desc2 = st.columns(2)
+            h = datetime.utcnow() - timedelta(hours=3)
+            fecha_str = h.strftime('%d%m%Y')
+            
+            with col_desc1:
+                pdf_main_data = build_pdf_main(df_res)
+                st.download_button(
+                    label="📥 Descargar Reporte Principal", 
+                    data=pdf_main_data, 
+                    file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
+                    mime="application/pdf", 
+                    use_container_width=True
+                )
+                
+            with col_desc2:
+                pdf_resumen_data = build_pdf_resumen(df_res)
+                st.download_button(
+                    label="📊 Descargar Resumen General (Tabla y Gráficos)", 
+                    data=pdf_resumen_data, 
+                    file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
+                    mime="application/pdf", 
+                    use_container_width=True
+                )
+        else:
+            st.warning("⚠️ El cruce terminó, pero no se encontraron datos válidos de matrices para mostrar. Asegúrate de que las piezas RH en el Google Sheets no estén en blanco.")
