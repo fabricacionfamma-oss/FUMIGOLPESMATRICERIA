@@ -41,7 +41,9 @@ def get_match_key(texto):
     """Extrae la secuencia numérica más larga para cruzar datos entre plataformas."""
     if pd.isna(texto): return ""
     val = str(texto).upper()
-    # Busca secuencias de al menos 5 números (para ignorar los OP10, OP20, etc.)
+    # Ignorar operaciones que confunden la búsqueda
+    val = re.sub(r'-?OP\d+', '', val)
+    # Buscar secuencias de al menos 5 números seguidos
     matches = re.findall(r'\d{5,}', val)
     return max(matches, key=len) if matches else re.sub(r'[^A-Z0-9]', '', val)
 
@@ -56,49 +58,48 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # --- 2. CARGAR RESPUESTAS DE GOOGLE FORMS (ESCANEO MULTICOLUMNA ESTILO FAMMA) ---
+    # --- 2. CARGAR RESPUESTAS DE GOOGLE FORMS (FILTRO ESTRICTO) ---
     def fetch_forms(url, tipo_mant):
         try:
             df = pd.read_csv(url)
             cols = [str(c).upper().strip() for c in df.columns]
             df.columns = cols
             
-            # Buscar columna de fecha
-            col_f = next((c for c in cols if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
+            # Buscar FECHA (Priorizar la manual del operador)
+            col_f = next((c for c in cols if c == 'FECHA'), None)
+            if not col_f:
+                col_f = next((c for c in cols if 'MARCA TEMPORAL' in c), None)
             if not col_f: return pd.DataFrame()
             
-            # Identificar TODAS las columnas que puedan contener la pieza (por secciones del form)
-            kw_pieza = ['PIEZA', 'NUMERO', 'NÚMERO', 'RH', 'LH', 'MATRIZ']
-            cols_pieza = [c for c in cols if any(k in c for k in kw_pieza)]
+            # COLUMNAS DE PIEZAS: Solo buscamos las listas desplegables reales
+            cols_pieza = [c for c in cols if c.startswith('PIEZAS') or 'NUMERO DE PIEZA' in c or 'NÚMERO DE PIEZA' in c]
             
-            # Identificar TODAS las columnas que indiquen si el trabajo terminó
-            kw_term = ['TERMINADO', 'TERMINO', 'ESTADO', 'CERRAD', 'PREVENTIVO?', 'CORRECTIVO?']
-            cols_term = [c for c in cols if any(k in c for k in kw_term)]
+            # COLUMNAS DE TERMINACIÓN
+            cols_term = [c for c in cols if 'TERMINADO' in c or 'TERMINO' in c]
             
             registros = []
             for _, row in df.iterrows():
                 fecha = pd.to_datetime(row[col_f], dayfirst=True, errors='coerce')
                 if pd.isna(fecha): continue
                 
-                # ESCANEO: Buscar la pieza en todas las columnas candidatas de esta fila
+                # Encontrar la pieza en las columnas correctas
                 pieza_raw = ""
                 for cp in cols_pieza:
                     val = clean_str(row[cp])
                     if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', 'NO APLICA', '']:
                         pieza_raw = val
-                        break # Encontramos la respuesta del operador
+                        break 
                 
                 if not pieza_raw: continue
                 
                 pieza_key = get_match_key(pieza_raw)
                 if not pieza_key: continue
                 
-                # ESCANEO: Buscar si está abierto en las columnas de estado
+                # Verificar si el trabajo está abierto
                 abierto = 'NO'
                 if cols_term:
                     for ct in cols_term:
                         val_term = clean_str(row[ct])
-                        # Si en alguna de las columnas de estado dice NO, PENDIENTE o FALSO, queda abierto
                         if val_term in ['NO', 'FALSO', 'PENDIENTE'] or 'NO' in val_term.split():
                             abierto = 'SI'
                             break
@@ -305,10 +306,10 @@ if datos_listos:
         with st.spinner("Calculando golpes y revisando pendientes..."):
             df_res, df_ab = procesar_logica_golpes(df_cat, df_prod, df_forms)
             st.session_state['res_final'] = df_res
-            st.session_state['abiertos_final'] = df_ab
+            st.session_state['ab_final'] = df_ab
 
 if 'res_final' in st.session_state:
-    df, df_ab = st.session_state['res_final'], st.session_state['abiertos_final']
+    df, df_ab = st.session_state['res_final'], st.session_state['ab_final']
     st.write("---")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
