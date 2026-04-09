@@ -24,10 +24,7 @@ st.divider()
 # ==========================================
 # 2. ENLACES DE DATOS (Google Sheets & Forms)
 # ==========================================
-# Catálogo Maestro
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/198KjQWZwfvvWwq1q1N1zv1cgzkot2hhGbwQvbi9_zFQ/export?format=csv&gid=818188145"
-
-# NUEVOS ENLACES DE FORMS ACTUALIZADOS
 URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990"
 URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
@@ -44,12 +41,13 @@ def get_match_key(texto):
     """Extrae la secuencia numérica más larga para cruzar datos entre plataformas."""
     if pd.isna(texto): return ""
     val = str(texto).upper()
+    # Busca secuencias de al menos 5 números (para ignorar los OP10, OP20, etc.)
     matches = re.findall(r'\d{5,}', val)
     return max(matches, key=len) if matches else re.sub(r'[^A-Z0-9]', '', val)
 
 @st.cache_data(ttl=300)
 def load_all_sources():
-    # --- 1. CARGAR CATÁLOGO (FILA 3 encabezados) ---
+    # --- 1. CARGAR CATÁLOGO (Saltando 2 filas) ---
     try:
         df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
         df_cat.columns = df_cat.columns.astype(str).str.upper().str.strip()
@@ -58,32 +56,64 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # --- 2. CARGAR RESPUESTAS DE GOOGLE FORMS ---
+    # --- 2. CARGAR RESPUESTAS DE GOOGLE FORMS (ESCANEO MULTICOLUMNA ESTILO FAMMA) ---
     def fetch_forms(url, tipo_mant):
         try:
             df = pd.read_csv(url)
-            df.columns = df.columns.astype(str).str.upper()
+            cols = [str(c).upper().strip() for c in df.columns]
+            df.columns = cols
             
-            col_f = next((c for c in df.columns if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
-            col_p = next((c for c in df.columns if 'PIEZA' in c or 'NUMERO' in c or 'RH' in c), None)
-            col_term = next((c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c or 'CERRAD' in c), None)
+            # Buscar columna de fecha
+            col_f = next((c for c in cols if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
+            if not col_f: return pd.DataFrame()
             
-            if col_f and col_p:
-                df['FECHA_DT'] = pd.to_datetime(df[col_f], dayfirst=True, errors='coerce')
-                df['PIEZA_KEY'] = df[col_p].apply(get_match_key)
-                df['TIPO_MANT'] = tipo_mant
-                df['PIEZA_RAW'] = df[col_p] 
+            # Identificar TODAS las columnas que puedan contener la pieza (por secciones del form)
+            kw_pieza = ['PIEZA', 'NUMERO', 'NÚMERO', 'RH', 'LH', 'MATRIZ']
+            cols_pieza = [c for c in cols if any(k in c for k in kw_pieza)]
+            
+            # Identificar TODAS las columnas que indiquen si el trabajo terminó
+            kw_term = ['TERMINADO', 'TERMINO', 'ESTADO', 'CERRAD', 'PREVENTIVO?', 'CORRECTIVO?']
+            cols_term = [c for c in cols if any(k in c for k in kw_term)]
+            
+            registros = []
+            for _, row in df.iterrows():
+                fecha = pd.to_datetime(row[col_f], dayfirst=True, errors='coerce')
+                if pd.isna(fecha): continue
                 
-                if col_term:
-                    # Lógica: Si contiene NO o es PENDIENTE/FALSO, está abierto
-                    df['ABIERTO'] = df[col_term].apply(lambda x: 'SI' if 'NO' in str(x).strip().upper() or str(x).strip().upper() in ['FALSO', 'PENDIENTE'] else 'NO')
-                else:
-                    df['ABIERTO'] = 'NO'
-                    
-                return df[['FECHA_DT', 'PIEZA_KEY', 'TIPO_MANT', 'ABIERTO', 'PIEZA_RAW']].dropna(subset=['FECHA_DT'])
-        except Exception: 
+                # ESCANEO: Buscar la pieza en todas las columnas candidatas de esta fila
+                pieza_raw = ""
+                for cp in cols_pieza:
+                    val = clean_str(row[cp])
+                    if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', 'NO APLICA', '']:
+                        pieza_raw = val
+                        break # Encontramos la respuesta del operador
+                
+                if not pieza_raw: continue
+                
+                pieza_key = get_match_key(pieza_raw)
+                if not pieza_key: continue
+                
+                # ESCANEO: Buscar si está abierto en las columnas de estado
+                abierto = 'NO'
+                if cols_term:
+                    for ct in cols_term:
+                        val_term = clean_str(row[ct])
+                        # Si en alguna de las columnas de estado dice NO, PENDIENTE o FALSO, queda abierto
+                        if val_term in ['NO', 'FALSO', 'PENDIENTE'] or 'NO' in val_term.split():
+                            abierto = 'SI'
+                            break
+                
+                registros.append({
+                    'FECHA_DT': fecha,
+                    'PIEZA_KEY': pieza_key,
+                    'TIPO_MANT': tipo_mant,
+                    'ABIERTO': abierto,
+                    'PIEZA_RAW': pieza_raw
+                })
+                
+            return pd.DataFrame(registros)
+        except Exception as e: 
             return pd.DataFrame()
-        return pd.DataFrame()
 
     df_forms_mants = pd.concat([fetch_forms(URL_FORMS_PREV, "PREV"), fetch_forms(URL_FORMS_CORR, "CORR")])
 
@@ -130,7 +160,7 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms):
                 'FECHA_APERTURA': ab_row['FECHA_DT'].strftime('%d/%m/%Y')
             })
 
-    # 2. PROCESAR EL LISTADO RH DEL CATÁLOGO
+    # 2. CALCULAR GOLPES PARA EL LISTADO RH
     for _, row in df_cat.iterrows():
         pieza_rh = clean_str(row.get('RH', ''))
         if not pieza_rh or pieza_rh in ['NAN', '-']: continue
@@ -145,7 +175,7 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms):
 
         fecha_form = pd.NaT
         if not df_forms.empty:
-            # Solo consideramos mantenimientos CERRADOS para resetear el contador
+            # Solo consideramos mantenimientos CERRADOS para resetear el contador de golpes
             match_form = df_forms[(df_forms['PIEZA_KEY'] == pieza_key) & (df_forms['ABIERTO'] == 'NO')]
             if not match_form.empty:
                 fecha_form = match_form['FECHA_DT'].max()
@@ -200,7 +230,7 @@ class PDFGolpes(FPDF):
 def build_pdf_data(df, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     
-    # --- HOJA 1: SEMÁFORO ---
+    # --- HOJA 1: MATRICES Y GOLPES ---
     pdf.add_page()
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
@@ -275,19 +305,16 @@ if datos_listos:
         with st.spinner("Calculando golpes y revisando pendientes..."):
             df_res, df_ab = procesar_logica_golpes(df_cat, df_prod, df_forms)
             st.session_state['res_final'] = df_res
-            st.session_state['abiertos_final'] = df_ab # <-- Aquí la guardamos como 'abiertos_final'
+            st.session_state['abiertos_final'] = df_ab
 
 if 'res_final' in st.session_state:
-    df = st.session_state['res_final']
-    df_ab = st.session_state['abiertos_final'] # <-- CORRECCIÓN: Estaba como 'ab_final'
+    df, df_ab = st.session_state['res_final'], st.session_state['abiertos_final']
+    st.write("---")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
+    c2.metric("Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
+    c3.metric("Total ⚙️", len(df))
+    c4.metric("Abiertos ⚠️", len(df_ab))
     
-    if not df.empty:
-        st.write("---")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
-        c2.metric("Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
-        c3.metric("Total ⚙️", len(df))
-        c4.metric("Abiertos ⚠️", len(df_ab))
-        
-        pdf_bytes = build_pdf_data(df, df_ab)
-        st.download_button("📥 Descargar Reporte PDF Completo", pdf_bytes, "Reporte_Golpes_Matrices.pdf", "application/pdf", use_container_width=True)
+    pdf_bytes = build_pdf_data(df, df_ab)
+    st.download_button("📥 Descargar Reporte PDF Completo", pdf_bytes, "Reporte_Golpes_Matrices.pdf", "application/pdf", use_container_width=True)
