@@ -17,19 +17,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="header-style">⚙️ Reporte Inteligente: Control de Golpes de Matrices</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Prioridad de Fecha: Google Forms > Catálogo > Sin Registro (-).</p>", unsafe_allow_html=True)
+st.markdown('<div class="header-style">⚙️ Diagnóstico: Control de Golpes de Matrices</div>', unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
-# 2. ENLACES DE DATOS (Google Sheets & Forms)
+# 2. ENLACES DE DATOS (URLs de exportación) [cite: 2, 28]
 # ==========================================
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/198KjQWZwfvvWwq1q1N1zv1cgzkot2hhGbwQvbi9_zFQ/export?format=csv&gid=818188145"
 URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990"
 URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
 # ==========================================
-# 3. FUNCIONES DE EXTRACCIÓN Y LIMPIEZA
+# 3. FUNCIONES DE LIMPIEZA 
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
@@ -44,30 +43,36 @@ def get_match_key(texto):
     matches = re.findall(r'\d{5,}', val) 
     return max(matches, key=len) if matches else re.sub(r'[^A-Z0-9]', '', val)
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60) # Cache corto para pruebas 
 def load_all_sources():
-    # 1. CARGAR CATÁLOGO (Nombres y Fecha Base)
+    # 1. CARGAR CATÁLOGO [cite: 3, 11]
     try:
         df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
         df_cat.columns = df_cat.columns.astype(str).str.upper().str.strip()
         df_cat['PIEZA_KEY'] = df_cat['RH'].apply(lambda x: get_match_key(clean_str(x)))
     except Exception as e:
-        st.error(f"Error cargando Catálogo: {e}")
+        st.error(f"Error Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # 2. CARGAR FORMS (Último Mantenimiento y Estado)
+    # 2. CARGAR FORMS CON DIAGNÓSTICO [cite: 31, 33]
     def fetch_forms(url, tipo_mant):
         try:
             df = pd.read_csv(url)
             if df.empty: return pd.DataFrame()
             df.columns = [str(c).upper().strip() for c in df.columns]
             
+            # DIAGNÓSTICO: Ver columnas en la web
+            with st.expander(f"🔍 Columnas detectadas en {tipo_mant}"):
+                st.write(list(df.columns))
+            
+            # Prioridad de fecha: Columna FECHA > Marca Temporal [cite: 9, 32]
             col_f = next((c for c in df.columns if c == 'FECHA'), 'MARCA TEMPORAL')
             cols_pieza = [c for c in df.columns if c.startswith('PIEZAS') or 'NUMERO DE PIEZA' in c]
-            cols_term = [c for c in df.columns if 'TERMINO' in c or 'TERMINADO' in c]
+            cols_term = [c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c]
             
             registros = []
             for _, row in df.iterrows():
+                # Intentar convertir fecha [cite: 9]
                 fecha = pd.to_datetime(row.get(col_f), dayfirst=True, errors='coerce')
                 if pd.isna(fecha): continue
                 
@@ -80,6 +85,7 @@ def load_all_sources():
                 
                 if not pieza_raw: continue
                 
+                # Identificar si está ABIERTO [cite: 11, 35]
                 abierto = 'NO'
                 for ct in cols_term:
                     val_term = clean_str(row.get(ct))
@@ -88,18 +94,17 @@ def load_all_sources():
                         break
                 
                 registros.append({
-                    'FECHA_DT': fecha,
-                    'TIPO_MANT': tipo_mant,
-                    'ABIERTO': abierto,
-                    'PIEZA_RAW': pieza_raw,
-                    'PIEZA_KEY': get_match_key(pieza_raw)
+                    'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'ABIERTO': abierto,
+                    'PIEZA_RAW': pieza_raw, 'PIEZA_KEY': get_match_key(pieza_raw)
                 })
             return pd.DataFrame(registros)
-        except: return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Error en Form {tipo_mant}: {e}")
+            return pd.DataFrame()
 
     df_forms_all = pd.concat([fetch_forms(URL_FORMS_PREV, "PREV"), fetch_forms(URL_FORMS_CORR, "CORR")])
 
-    # 3. CARGAR SQL (Golpes Acumulados)
+    # 3. CARGAR SQL [cite: 10, 32]
     try:
         conn = st.connection("wii_bi", type="sql")
         q_prod = "SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES FROM PROD_D_01 p JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Date >= '2023-01-01' GROUP BY pr.Code, CAST(p.Date as DATE)"
@@ -112,64 +117,60 @@ def load_all_sources():
     return df_cat, df_sql_prod, df_forms_all
 
 # ==========================================
-# 4. MOTOR DE CRUCE Y CÁLCULO
+# 4. MOTOR DE CRUCE 
 # ==========================================
 def procesar_logica_golpes(df_cat, df_prod, df_forms):
     resultados = []
     abiertos = []
+    # Usar fecha actual para el inicio del conteo anual [cite: 9]
     inicio_anio = pd.to_datetime(f"{datetime.now().year}-01-01")
 
-    # Identificar mantenimientos ABIERTOS para el cuadro final
+    # 1. Recopilar ABIERTOS
     if not df_forms.empty:
         df_ab = df_forms[df_forms['ABIERTO'] == 'SI']
         for _, r in df_ab.iterrows():
             match_cat = df_cat[df_cat['PIEZA_KEY'] == r['PIEZA_KEY']]
             cliente = clean_str(match_cat.iloc[0].get('CLIENTE', 'Externo')) if not match_cat.empty else "Externo"
             abiertos.append({
-                'CLIENTE': cliente,
-                'PIEZA_REPORTE': str(r['PIEZA_RAW']),
-                'TIPO': r['TIPO_MANT'],
-                'FECHA_APERTURA': r['FECHA_DT'].strftime('%d/%m/%Y')
+                'CLIENTE': cliente, 'PIEZA_REPORTE': str(r['PIEZA_RAW']),
+                'TIPO': r['TIPO_MANT'], 'FECHA_APERTURA': r['FECHA_DT'].strftime('%d/%m/%Y')
             })
 
-    # Procesar Catálogo (Nombres del herramental)
+    # 2. Procesar Catálogo [cite: 3, 33]
     for _, row in df_cat.iterrows():
         pieza_rh = clean_str(row.get('RH', ''))
         if not pieza_rh or pieza_rh in ['NAN', '-']: continue
         
         p_key = row['PIEZA_KEY']
+        # Blindaje numérico [cite: 10]
         g_excel_raw = pd.to_numeric(row.get('GOLPES'), errors='coerce')
         g_excel = 0 if pd.isna(g_excel_raw) else int(g_excel_raw)
         
-        # PRIORIDAD DE FECHAS: 1. Forms (Cerrados) -> 2. Catálogo -> 3. Guion
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         f_form = pd.NaT
         if not df_forms.empty:
+            # Buscar último mantenimiento CERRADO 
             match_f = df_forms[(df_forms['PIEZA_KEY'] == p_key) & (df_forms['ABIERTO'] == 'NO')]
-            if not match_f.empty: 
-                f_form = match_f['FECHA_DT'].max()
+            if not match_f.empty: f_form = match_f['FECHA_DT'].max()
 
-        # Determinar fecha final y punto de arranque para SQL
-        if pd.notna(f_form):
+        # Lógica de prioridad 
+        if pd.notna(f_form) and (pd.isna(f_excel) or f_form > f_excel):
             f_final = f_form
-            # Sumamos producción desde el nuevo mantenimiento
             prod_sql = df_prod[(df_prod['PIEZA_KEY'] == p_key) & (df_prod['FECHA'] >= f_final)]
             g_final = int(prod_sql['GOLPES'].sum())
         elif pd.notna(f_excel):
             f_final = f_excel
-            # Sumamos producción acumulada del año sobre la base del Excel
             prod_sql = df_prod[(df_prod['PIEZA_KEY'] == p_key) & (df_prod['FECHA'] >= inicio_anio)]
             g_final = g_excel + int(prod_sql['GOLPES'].sum())
         else:
             f_final = pd.NaT
-            g_final = g_excel # Sin fecha, solo queda lo que diga el catálogo
+            g_final = g_excel
 
         limite = 20000
         color = "ROJO" if g_final >= limite else "AMARILLO" if g_final >= (limite*0.8) else "VERDE"
 
         resultados.append({
-            'CLIENTE': clean_str(row.get('CLIENTE', '-')),
-            'PIEZA': pieza_rh,
+            'CLIENTE': clean_str(row.get('CLIENTE', '-')), 'PIEZA': pieza_rh,
             'ULT_MANT': f_final.strftime('%d/%m/%Y') if pd.notna(f_final) else "-",
             'GOLPES': g_final, 'LIMITE': limite, 'COLOR': color,
             'ESTADO': "MANT. REQUERIDO" if color == "ROJO" else "ALERTA" if color == "AMARILLO" else "OK"
@@ -178,7 +179,7 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms):
     return pd.DataFrame(resultados), pd.DataFrame(abiertos)
 
 # ==========================================
-# 5. GENERACIÓN DE PDF
+# 5. GENERACIÓN DE PDF [cite: 5, 20]
 # ==========================================
 class PDFGolpes(FPDF):
     def header(self):
@@ -222,7 +223,7 @@ def build_pdf_data(df, df_ab):
     return b
 
 # ==========================================
-# 6. INTERFAZ STREAMLIT
+# 6. INTERFAZ [cite: 31, 32]
 # ==========================================
 if st.button("🔄 Actualizar Todo (Limpiar Caché)", use_container_width=True):
     st.cache_data.clear(); st.rerun()
@@ -238,6 +239,12 @@ if not df_cat.empty:
 if 'res_final' in st.session_state:
     df, df_ab = st.session_state['res_final'], st.session_state['ab_final']
     st.write("---")
+    
+    # Mostrar tablas de control para diagnóstico 
+    with st.expander("📊 Ver Datos de Formularios (Primeras 5 filas)"):
+        if not df_forms.empty: st.write(df_forms.head())
+        else: st.write("No hay datos cargados de los formularios.")
+    
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
     c2.metric("Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
