@@ -63,21 +63,22 @@ def load_all_sources():
             
             col_f = next((c for c in df.columns if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
             col_p = next((c for c in df.columns if 'PIEZA' in c or 'NUMERO' in c or 'RH' in c), None)
-            col_term = next((c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c), None)
+            # Buscamos columnas que indiquen si el trabajo terminó
+            col_term = next((c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c or 'CERRAD' in c), None)
             
             if col_f and col_p:
                 df['FECHA_DT'] = pd.to_datetime(df[col_f], dayfirst=True, errors='coerce')
                 df['PIEZA_KEY'] = df[col_p].apply(get_match_key)
                 df['TIPO_MANT'] = tipo_mant
-                df['PIEZA_RAW'] = df[col_p] # Guardamos el nombre original para el reporte de abiertos
+                df['PIEZA_RAW'] = df[col_p] 
                 
                 if col_term:
-                    # Si dice NO, FALSO o PENDIENTE, está abierto
-                    df['ABIERTO'] = df[col_term].apply(lambda x: 'SI' if str(x).strip().upper() in ['NO', 'FALSO', 'PENDIENTE'] else 'NO')
+                    # Si contiene "NO" en cualquier parte de la respuesta, lo consideramos ABIERTO
+                    df['ABIERTO'] = df[col_term].apply(lambda x: 'SI' if 'NO' in str(x).strip().upper() or str(x).strip().upper() in ['FALSO', 'PENDIENTE'] else 'NO')
                 else:
                     df['ABIERTO'] = 'NO'
                     
-                return df[['FECHA_DT', 'PIEZA_KEY', 'TIPO_MANT', 'ABIERTO', 'PIEZA_RAW']].dropna(subset=['FECHA_DT', 'PIEZA_KEY'])
+                return df[['FECHA_DT', 'PIEZA_KEY', 'TIPO_MANT', 'ABIERTO', 'PIEZA_RAW']].dropna(subset=['FECHA_DT'])
         except Exception: 
             return pd.DataFrame()
         return pd.DataFrame()
@@ -106,7 +107,7 @@ def load_all_sources():
         df_sql_mants['PIEZA_KEY'] = df_sql_mants['DETALLE'].apply(get_match_key)
         df_sql_mants['FECHA_DT'] = pd.to_datetime(df_sql_mants['FECHA'])
         df_sql_mants['TIPO_MANT'] = df_sql_mants['DETALLE'].apply(lambda x: 'PREV' if 'PREV' in str(x).upper() else 'CORR' if 'CORR' in str(x).upper() else 'OTRO')
-        df_sql_mants['ABIERTO'] = 'NO' # Los eventos de SQL los consideramos cerrados
+        df_sql_mants['ABIERTO'] = 'NO' 
         df_sql_mants['PIEZA_RAW'] = df_sql_mants['DETALLE']
         
     except Exception as e:
@@ -125,11 +126,28 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_mants):
     anio_actual = pd.to_datetime("today").year
     inicio_anio = pd.to_datetime(f"{anio_actual}-01-01")
 
-    # Unificamos mantenimientos externos
     cols_necesarias = ['FECHA_DT', 'PIEZA_KEY', 'TIPO_MANT', 'ABIERTO', 'PIEZA_RAW']
     sql_mants_filtrado = df_sql_mants[cols_necesarias] if not df_sql_mants.empty else pd.DataFrame(columns=cols_necesarias)
     mants_externos = pd.concat([df_forms, sql_mants_filtrado]).sort_values('FECHA_DT', ascending=False)
 
+    # 1. RECOPILAR ABSOLUTAMENTE TODOS LOS MANTENIMIENTOS ABIERTOS DE FORMS (INDEPENDIENTE DEL CATÁLOGO)
+    if not df_forms.empty:
+        df_solo_abiertos = df_forms[df_forms['ABIERTO'] == 'SI']
+        for _, ab_row in df_solo_abiertos.iterrows():
+            # Intentamos buscar el cliente/pieza oficial si coincide la llave
+            match_cat = df_cat[df_cat['RH'].apply(lambda x: get_match_key(clean_str(x))) == ab_row['PIEZA_KEY']]
+            cliente_txt = clean_str(match_cat.iloc[0]['CLIENTE']) if not match_cat.empty and 'CLIENTE' in match_cat.columns else "Sin Cliente"
+            pieza_txt = clean_str(match_cat.iloc[0]['RH']) if not match_cat.empty and 'RH' in match_cat.columns else "-"
+            
+            abiertos.append({
+                'CLIENTE': cliente_txt,
+                'PIEZA_CATALOGO': pieza_txt,
+                'PIEZA_REPORTE': str(ab_row['PIEZA_RAW']),
+                'TIPO_MANT': str(ab_row['TIPO_MANT']),
+                'FECHA_APERTURA': ab_row['FECHA_DT'].strftime('%d/%m/%Y')
+            })
+
+    # 2. CALCULAR GOLPES PARA EL LISTADO RH
     for _, row in df_cat.iterrows():
         pieza_rh = clean_str(row.get('RH', ''))
         if not pieza_rh or pieza_rh in ['NAN', '-']: continue
@@ -137,37 +155,20 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_mants):
         pieza_key = get_match_key(pieza_rh)
         cliente = clean_str(row.get('CLIENTE', '-'))
         
-        # Blindaje para los Golpes del Excel
         golpes_excel = pd.to_numeric(row.get('GOLPES', 0), errors='coerce')
         golpes_excel = 0 if pd.isna(golpes_excel) else int(golpes_excel)
         
         fecha_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
 
-        # Buscar en el historial externo (Forms + SQL)
         match_externo = mants_externos[mants_externos['PIEZA_KEY'] == pieza_key]
         fecha_externa = match_externo['FECHA_DT'].max() if not match_externo.empty else pd.NaT
 
-        # Revisar si tiene mantenimientos ABIERTOS (Solo de Forms)
-        if not match_externo.empty:
-            abiertos_maq = match_externo[match_externo['ABIERTO'] == 'SI']
-            for _, ab_row in abiertos_maq.iterrows():
-                abiertos.append({
-                    'CLIENTE': cliente,
-                    'PIEZA_CATALOGO': pieza_rh,
-                    'PIEZA_REPORTE': ab_row['PIEZA_RAW'],
-                    'TIPO_MANT': ab_row['TIPO_MANT'],
-                    'FECHA_APERTURA': ab_row['FECHA_DT'].strftime('%d/%m/%Y')
-                })
-
-        # LÓGICA DE GOLPES
         golpes_finales = 0
         if pd.notna(fecha_externa) and (pd.isna(fecha_excel) or fecha_externa > fecha_excel):
-            # CASO 1: Mantenimiento más nuevo fuera del excel -> Resetear y contar desde ahí
             fecha_final = fecha_externa
             prod = df_prod[(df_prod['PIEZA_KEY'] == pieza_key) & (df_prod['FECHA'] >= fecha_final)]
             golpes_finales = int(prod['GOLPES'].sum())
         else:
-            # CASO 2: Nada nuevo -> Usar base de Excel + Producción del año actual
             fecha_final = fecha_excel
             prod = df_prod[(df_prod['PIEZA_KEY'] == pieza_key) & (df_prod['FECHA'] >= inicio_anio)]
             golpes_finales = golpes_excel + int(prod['GOLPES'].sum())
@@ -196,7 +197,7 @@ class PDFGolpes(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Control de Golpes de Matrices (Validacion Forms + SQL)", border=0, ln=True, align='C')
+        self.cell(0, 10, "Control de Golpes de Matrices", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -218,24 +219,33 @@ def build_pdf_data(df, df_abiertos):
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
     
-    cols = [("Cliente", 25), ("Pieza RH (Catálogo)", 90), ("Ult. Mant.", 25), ("Golpes", 25), ("Limite", 25), ("Estado", 80)]
+    cols = [("Cliente", 25), ("Pieza RH (Catálogo)", 90), ("Ult. Mant.", 25), ("Golpes Acum.", 30), ("Limite", 30), ("Estado Actual", 70)]
     for c in cols: pdf.cell(c[1], 8, c[0], 1, 0, 'C', True)
     pdf.ln()
 
-    pdf.set_font("Arial", '', 8)
-    pdf.set_text_color(0, 0, 0)
     for _, r in df.iterrows():
-        bg = (255, 180, 180) if r['COLOR'] == "ROJO" else (255, 240, 180) if r['COLOR'] == "AMARILLO" else (255, 255, 255)
-        pdf.set_fill_color(*bg)
-        
-        pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C', True)
-        pdf.cell(90, 7, r['PIEZA'][:50], 1, 0, 'L', True)
-        pdf.cell(25, 7, r['ULT_MANT'], 1, 0, 'C', True)
-        pdf.set_font("Arial", 'B', 8)
-        pdf.cell(25, 7, f"{r['GOLPES']:,}", 1, 0, 'C', True)
+        # Primero imprimimos las celdas normales en blanco
+        pdf.set_fill_color(255, 255, 255)
+        pdf.set_text_color(0, 0, 0)
         pdf.set_font("Arial", '', 8)
-        pdf.cell(25, 7, f"{r['LIMITE']:,}", 1, 0, 'C', True)
-        pdf.cell(80, 7, r['ESTADO'], 1, 1, 'C', True)
+        
+        pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C', False)
+        pdf.cell(90, 7, r['PIEZA'][:50], 1, 0, 'L', False)
+        pdf.cell(25, 7, r['ULT_MANT'], 1, 0, 'C', False)
+        
+        pdf.set_font("Arial", 'B', 8)
+        pdf.cell(30, 7, f"{r['GOLPES']:,}", 1, 0, 'C', False)
+        pdf.set_font("Arial", '', 8)
+        pdf.cell(30, 7, f"{r['LIMITE']:,}", 1, 0, 'C', False)
+        
+        # Ahora coloreamos ÚNICAMENTE la celda de Estado
+        bg = (220, 53, 69) if r['COLOR'] == "ROJO" else (255, 193, 7) if r['COLOR'] == "AMARILLO" else (40, 167, 69)
+        txt = (255, 255, 255) if r['COLOR'] in ["ROJO", "VERDE"] else (0, 0, 0)
+        
+        pdf.set_fill_color(*bg)
+        pdf.set_text_color(*txt)
+        pdf.set_font("Arial", 'B', 8)
+        pdf.cell(70, 7, r['ESTADO'], 1, 1, 'C', True)
 
     # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
     if not df_abiertos.empty:
@@ -250,8 +260,8 @@ def build_pdf_data(df, df_abiertos):
         pdf.set_text_color(255, 255, 255)
         
         pdf.cell(25, 8, "Cliente", 1, 0, 'C', True)
-        pdf.cell(80, 8, "Pieza (Catálogo)", 1, 0, 'C', True)
-        pdf.cell(100, 8, "Nombre en Reporte", 1, 0, 'C', True)
+        pdf.cell(80, 8, "Pieza (Estimada en Catalogo)", 1, 0, 'C', True)
+        pdf.cell(100, 8, "Texto Ingresado en Reporte", 1, 0, 'C', True)
         pdf.cell(30, 8, "Tipo", 1, 0, 'C', True)
         pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', True)
         
