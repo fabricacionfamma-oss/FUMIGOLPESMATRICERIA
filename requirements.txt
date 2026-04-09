@@ -4,4 +4,4 @@ plotly
 fpdf
 kaleido
 SQLAlchemy
-pyodbc
+pymssql
