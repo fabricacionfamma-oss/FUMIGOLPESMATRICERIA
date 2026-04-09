@@ -275,16 +275,19 @@ if datos_listos:
         with st.spinner("Calculando golpes y revisando pendientes..."):
             df_res, df_ab = procesar_logica_golpes(df_cat, df_prod, df_forms)
             st.session_state['res_final'] = df_res
-            st.session_state['ab_final'] = df_ab
+            st.session_state['abiertos_final'] = df_ab # <-- Aquí la guardamos como 'abiertos_final'
 
 if 'res_final' in st.session_state:
-    df, df_ab = st.session_state['res_final'], st.session_state['ab_final']
-    st.write("---")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
-    c2.metric("Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
-    c3.metric("Total ⚙️", len(df))
-    c4.metric("Abiertos ⚠️", len(df_ab))
+    df = st.session_state['res_final']
+    df_ab = st.session_state['abiertos_final'] # <-- CORRECCIÓN: Estaba como 'ab_final'
     
-    pdf_bytes = build_pdf_data(df, df_ab)
-    st.download_button("📥 Descargar Reporte PDF Completo", pdf_bytes, "Reporte_Golpes_Matrices.pdf", "application/pdf", use_container_width=True)
+    if not df.empty:
+        st.write("---")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
+        c2.metric("Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
+        c3.metric("Total ⚙️", len(df))
+        c4.metric("Abiertos ⚠️", len(df_ab))
+        
+        pdf_bytes = build_pdf_data(df, df_ab)
+        st.download_button("📥 Descargar Reporte PDF Completo", pdf_bytes, "Reporte_Golpes_Matrices.pdf", "application/pdf", use_container_width=True)
