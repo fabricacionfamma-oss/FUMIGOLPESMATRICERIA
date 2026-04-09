@@ -18,15 +18,18 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Reporte Inteligente: Control de Golpes de Matrices</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Cruce de Catálogo (RH) + Google Forms + SQL Server.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cruce de Catálogo (RH) + Producción SQL + Últimos Mantenimientos (Forms).</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
 # 2. ENLACES DE DATOS (Google Sheets & Forms)
 # ==========================================
+# Catálogo Maestro
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/198KjQWZwfvvWwq1q1N1zv1cgzkot2hhGbwQvbi9_zFQ/export?format=csv&gid=818188145"
-URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888"
-URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679"
+
+# NUEVOS ENLACES DE FORMS ACTUALIZADOS
+URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990"
+URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
 # ==========================================
 # 3. FUNCIONES DE EXTRACCIÓN Y LIMPIEZA
@@ -46,14 +49,14 @@ def get_match_key(texto):
 
 @st.cache_data(ttl=300)
 def load_all_sources():
-    # --- 1. CARGAR CATÁLOGO (Saltando 2 filas) ---
+    # --- 1. CARGAR CATÁLOGO (FILA 3 encabezados) ---
     try:
         df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
         df_cat.columns = df_cat.columns.astype(str).str.upper().str.strip()
         df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
     except Exception as e:
         st.error(f"Error cargando Catálogo: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     # --- 2. CARGAR RESPUESTAS DE GOOGLE FORMS ---
     def fetch_forms(url, tipo_mant):
@@ -63,7 +66,6 @@ def load_all_sources():
             
             col_f = next((c for c in df.columns if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
             col_p = next((c for c in df.columns if 'PIEZA' in c or 'NUMERO' in c or 'RH' in c), None)
-            # Buscamos columnas que indiquen si el trabajo terminó
             col_term = next((c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c or 'CERRAD' in c), None)
             
             if col_f and col_p:
@@ -73,7 +75,7 @@ def load_all_sources():
                 df['PIEZA_RAW'] = df[col_p] 
                 
                 if col_term:
-                    # Si contiene "NO" en cualquier parte de la respuesta, lo consideramos ABIERTO
+                    # Lógica: Si contiene NO o es PENDIENTE/FALSO, está abierto
                     df['ABIERTO'] = df[col_term].apply(lambda x: 'SI' if 'NO' in str(x).strip().upper() or str(x).strip().upper() in ['FALSO', 'PENDIENTE'] else 'NO')
                 else:
                     df['ABIERTO'] = 'NO'
@@ -85,10 +87,9 @@ def load_all_sources():
 
     df_forms_mants = pd.concat([fetch_forms(URL_FORMS_PREV, "PREV"), fetch_forms(URL_FORMS_CORR, "CORR")])
 
-    # --- 3. SQL SERVER (PRODUCCIÓN Y EVENTOS) ---
+    # --- 3. SQL SERVER (SOLO PARA PRODUCCIÓN) ---
     try:
         conn = st.connection("wii_bi", type="sql")
-        
         q_prod = """
             SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES 
             FROM PROD_D_01 p JOIN PRODUCT pr ON p.ProductId = pr.ProductId 
@@ -97,46 +98,28 @@ def load_all_sources():
         df_sql_prod = conn.query(q_prod)
         df_sql_prod['PIEZA_KEY'] = df_sql_prod['PIEZA'].apply(get_match_key)
         df_sql_prod['FECHA'] = pd.to_datetime(df_sql_prod['FECHA'])
-
-        q_event = """
-            SELECT CAST(e.Date as DATE) as FECHA, t4.Name as DETALLE 
-            FROM EVENT_01 e LEFT JOIN EVENTTYPE t4 ON e.EventTypeLevel4 = t4.EventTypeId 
-            WHERE UPPER(t4.Name) LIKE '%MATRI%' AND e.Date >= '2023-01-01'
-        """
-        df_sql_mants = conn.query(q_event)
-        df_sql_mants['PIEZA_KEY'] = df_sql_mants['DETALLE'].apply(get_match_key)
-        df_sql_mants['FECHA_DT'] = pd.to_datetime(df_sql_mants['FECHA'])
-        df_sql_mants['TIPO_MANT'] = df_sql_mants['DETALLE'].apply(lambda x: 'PREV' if 'PREV' in str(x).upper() else 'CORR' if 'CORR' in str(x).upper() else 'OTRO')
-        df_sql_mants['ABIERTO'] = 'NO' 
-        df_sql_mants['PIEZA_RAW'] = df_sql_mants['DETALLE']
-        
     except Exception as e:
         st.error(f"Error SQL: {e}")
-        df_sql_prod, df_sql_mants = pd.DataFrame(), pd.DataFrame()
+        df_sql_prod = pd.DataFrame()
 
-    return df_cat, df_sql_prod, df_forms_mants, df_sql_mants
+    return df_cat, df_sql_prod, df_forms_mants
 
 # ==========================================
 # 4. MOTOR DE CRUCE Y CÁLCULO
 # ==========================================
-def procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_mants):
+def procesar_logica_golpes(df_cat, df_prod, df_forms):
     resultados = []
     abiertos = []
     
     anio_actual = pd.to_datetime("today").year
     inicio_anio = pd.to_datetime(f"{anio_actual}-01-01")
 
-    cols_necesarias = ['FECHA_DT', 'PIEZA_KEY', 'TIPO_MANT', 'ABIERTO', 'PIEZA_RAW']
-    sql_mants_filtrado = df_sql_mants[cols_necesarias] if not df_sql_mants.empty else pd.DataFrame(columns=cols_necesarias)
-    mants_externos = pd.concat([df_forms, sql_mants_filtrado]).sort_values('FECHA_DT', ascending=False)
-
-    # 1. RECOPILAR ABSOLUTAMENTE TODOS LOS MANTENIMIENTOS ABIERTOS DE FORMS (INDEPENDIENTE DEL CATÁLOGO)
+    # 1. RECOPILAR TODO LO ABIERTO DE LOS FORMS
     if not df_forms.empty:
         df_solo_abiertos = df_forms[df_forms['ABIERTO'] == 'SI']
         for _, ab_row in df_solo_abiertos.iterrows():
-            # Intentamos buscar el cliente/pieza oficial si coincide la llave
             match_cat = df_cat[df_cat['RH'].apply(lambda x: get_match_key(clean_str(x))) == ab_row['PIEZA_KEY']]
-            cliente_txt = clean_str(match_cat.iloc[0]['CLIENTE']) if not match_cat.empty and 'CLIENTE' in match_cat.columns else "Sin Cliente"
+            cliente_txt = clean_str(match_cat.iloc[0]['CLIENTE']) if not match_cat.empty and 'CLIENTE' in match_cat.columns else "Externo/LH"
             pieza_txt = clean_str(match_cat.iloc[0]['RH']) if not match_cat.empty and 'RH' in match_cat.columns else "-"
             
             abiertos.append({
@@ -147,7 +130,7 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_mants):
                 'FECHA_APERTURA': ab_row['FECHA_DT'].strftime('%d/%m/%Y')
             })
 
-    # 2. CALCULAR GOLPES PARA EL LISTADO RH
+    # 2. PROCESAR EL LISTADO RH DEL CATÁLOGO
     for _, row in df_cat.iterrows():
         pieza_rh = clean_str(row.get('RH', ''))
         if not pieza_rh or pieza_rh in ['NAN', '-']: continue
@@ -160,12 +143,16 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_mants):
         
         fecha_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
 
-        match_externo = mants_externos[mants_externos['PIEZA_KEY'] == pieza_key]
-        fecha_externa = match_externo['FECHA_DT'].max() if not match_externo.empty else pd.NaT
+        fecha_form = pd.NaT
+        if not df_forms.empty:
+            # Solo consideramos mantenimientos CERRADOS para resetear el contador
+            match_form = df_forms[(df_forms['PIEZA_KEY'] == pieza_key) & (df_forms['ABIERTO'] == 'NO')]
+            if not match_form.empty:
+                fecha_form = match_form['FECHA_DT'].max()
 
         golpes_finales = 0
-        if pd.notna(fecha_externa) and (pd.isna(fecha_excel) or fecha_externa > fecha_excel):
-            fecha_final = fecha_externa
+        if pd.notna(fecha_form) and (pd.isna(fecha_excel) or fecha_form > fecha_excel):
+            fecha_final = fecha_form
             prod = df_prod[(df_prod['PIEZA_KEY'] == pieza_key) & (df_prod['FECHA'] >= fecha_final)]
             golpes_finales = int(prod['GOLPES'].sum())
         else:
@@ -191,13 +178,13 @@ def procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_mants):
     return pd.DataFrame(resultados), pd.DataFrame(abiertos)
 
 # ==========================================
-# 5. GENERACIÓN DE PDF Y EXPORTACIÓN
+# 5. GENERACIÓN DE PDF
 # ==========================================
 class PDFGolpes(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Control de Golpes de Matrices", border=0, ln=True, align='C')
+        self.cell(0, 10, "Control de Golpes de Matrices (Validacion Forms + SQL)", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -213,7 +200,7 @@ class PDFGolpes(FPDF):
 def build_pdf_data(df, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     
-    # --- HOJA 1: MATRICES Y GOLPES ---
+    # --- HOJA 1: SEMÁFORO ---
     pdf.add_page()
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
@@ -224,50 +211,39 @@ def build_pdf_data(df, df_abiertos):
     pdf.ln()
 
     for _, r in df.iterrows():
-        # Primero imprimimos las celdas normales en blanco
-        pdf.set_fill_color(255, 255, 255)
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_font("Arial", '', 8)
+        pdf.set_fill_color(255, 255, 255); pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", '', 8)
         
-        pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C', False)
-        pdf.cell(90, 7, r['PIEZA'][:50], 1, 0, 'L', False)
-        pdf.cell(25, 7, r['ULT_MANT'], 1, 0, 'C', False)
-        
+        pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C')
+        pdf.cell(90, 7, r['PIEZA'][:50], 1, 0, 'L')
+        pdf.cell(25, 7, r['ULT_MANT'], 1, 0, 'C')
         pdf.set_font("Arial", 'B', 8)
-        pdf.cell(30, 7, f"{r['GOLPES']:,}", 1, 0, 'C', False)
+        pdf.cell(30, 7, f"{r['GOLPES']:,}", 1, 0, 'C')
         pdf.set_font("Arial", '', 8)
-        pdf.cell(30, 7, f"{r['LIMITE']:,}", 1, 0, 'C', False)
+        pdf.cell(30, 7, f"{r['LIMITE']:,}", 1, 0, 'C')
         
-        # Ahora coloreamos ÚNICAMENTE la celda de Estado
+        # RESALTAR SOLO ESTA CELDA
         bg = (220, 53, 69) if r['COLOR'] == "ROJO" else (255, 193, 7) if r['COLOR'] == "AMARILLO" else (40, 167, 69)
         txt = (255, 255, 255) if r['COLOR'] in ["ROJO", "VERDE"] else (0, 0, 0)
         
-        pdf.set_fill_color(*bg)
-        pdf.set_text_color(*txt)
-        pdf.set_font("Arial", 'B', 8)
+        pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(70, 7, r['ESTADO'], 1, 1, 'C', True)
 
-    # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
+    # --- HOJA 2: ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
-        pdf.set_font("Arial", 'B', 14)
-        pdf.set_text_color(192, 0, 0)
-        pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de cierre en Google Forms)", ln=True)
+        pdf.set_font("Arial", 'B', 14); pdf.set_text_color(192, 0, 0)
+        pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes en Google Forms)", ln=True)
         pdf.ln(3)
         
-        pdf.set_font("Arial", 'B', 9)
-        pdf.set_fill_color(192, 0, 0)
-        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
         
         pdf.cell(25, 8, "Cliente", 1, 0, 'C', True)
-        pdf.cell(80, 8, "Pieza (Estimada en Catalogo)", 1, 0, 'C', True)
-        pdf.cell(100, 8, "Texto Ingresado en Reporte", 1, 0, 'C', True)
+        pdf.cell(80, 8, "Pieza (Estimada)", 1, 0, 'C', True)
+        pdf.cell(100, 8, "Reportado como", 1, 0, 'C', True)
         pdf.cell(30, 8, "Tipo", 1, 0, 'C', True)
-        pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', True)
+        pdf.cell(35, 8, "Apertura", 1, 1, 'C', True)
         
-        pdf.set_font("Arial", '', 8)
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_fill_color(255, 240, 240)
+        pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0); pdf.set_fill_color(255, 240, 240)
         
         for _, r in df_abiertos.iterrows():
             pdf.cell(25, 7, str(r['CLIENTE']), 1, 0, 'C', True)
@@ -277,55 +253,38 @@ def build_pdf_data(df, df_abiertos):
             pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C', True)
 
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name)
-    b = open(buf.name, "rb").read()
-    os.remove(buf.name)
+    pdf.output(buf.name); b = open(buf.name, "rb").read(); os.remove(buf.name)
     return b
 
 # ==========================================
 # 6. INTERFAZ STREAMLIT
 # ==========================================
 if st.button("🔄 Actualizar Todo (Limpiar Caché)", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
+    st.cache_data.clear(); st.rerun()
 
 with st.spinner("Sincronizando Excel, Google Forms y SQL Server..."):
     try:
-        df_cat, df_prod, df_forms, df_sql_m = load_all_sources()
-        if df_cat.empty:
-            st.error("🚨 Error de Lectura: El Google Sheets no se pudo descargar. Verifica los permisos.")
-            datos_listos = False
-        else:
-            datos_listos = True
+        df_cat, df_prod, df_forms = load_all_sources()
+        datos_listos = not df_cat.empty
     except Exception as e:
-        st.error(f"🚨 Error crítico durante la extracción: {e}")
-        datos_listos = False
+        st.error(f"🚨 Error: {e}"); datos_listos = False
 
 if datos_listos:
     st.success("Sincronización Exitosa.")
     if st.button("⚙️ Procesar Estado de Matrices", type="primary", use_container_width=True):
-        with st.spinner("Calculando golpes y revisando mantenimientos abiertos..."):
-            df_res, df_abiertos = procesar_logica_golpes(df_cat, df_prod, df_forms, df_sql_m)
+        with st.spinner("Calculando golpes y revisando pendientes..."):
+            df_res, df_ab = procesar_logica_golpes(df_cat, df_prod, df_forms)
             st.session_state['res_final'] = df_res
-            st.session_state['abiertos_final'] = df_abiertos
+            st.session_state['ab_final'] = df_ab
 
 if 'res_final' in st.session_state:
-    df = st.session_state['res_final']
-    df_ab = st.session_state['abiertos_final']
+    df, df_ab = st.session_state['res_final'], st.session_state['ab_final']
+    st.write("---")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
+    c2.metric("Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
+    c3.metric("Total ⚙️", len(df))
+    c4.metric("Abiertos ⚠️", len(df_ab))
     
-    if not df.empty:
-        st.write("---")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Matrices Críticas 🔴", len(df[df['COLOR']=="ROJO"]))
-        c2.metric("En Alerta 🟡", len(df[df['COLOR']=="AMARILLO"]))
-        c3.metric("Total Analizadas ⚙️", len(df))
-        c4.metric("Mant. Abiertos ⚠️", len(df_ab))
-        
-        pdf_bytes = build_pdf_data(df, df_ab)
-        st.download_button(
-            label="📥 Descargar Reporte PDF Completo (Con Abiertos)", 
-            data=pdf_bytes, 
-            file_name="Reporte_Golpes_y_Abiertos.pdf", 
-            mime="application/pdf", 
-            use_container_width=True
-        )
+    pdf_bytes = build_pdf_data(df, df_ab)
+    st.download_button("📥 Descargar Reporte PDF Completo", pdf_bytes, "Reporte_Golpes_Matrices.pdf", "application/pdf", use_container_width=True)
