@@ -181,6 +181,18 @@ def procesar_datos(df_cat, df_sql, df_forms):
         p_key = row['PIEZA_KEY']
         if not row['RH'] or row['RH'] == '-': continue
         
+        # --- LÓGICA DE TIPO Y LÍMITES DINÁMICOS ---
+        tipo_matriz = str(row.get('TIPO', '-')).strip().upper()
+        
+        if 'PROGRESIVAS FAU' in tipo_matriz or 'PROGRESIVA FAU' in tipo_matriz:
+            limite = 60000
+        elif 'PROGRESIVA' in tipo_matriz:
+            limite = 40000
+        elif 'MECANICA' in tipo_matriz or 'MECÁNICA' in tipo_matriz:
+            limite = 20000
+        else:
+            limite = 30000  # Default en caso de que no tenga clasificación
+            
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
         g_base = g_base if pd.notna(g_base) else 0
@@ -227,22 +239,31 @@ def procesar_datos(df_cat, df_sql, df_forms):
             prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= inicio_anio)] if not df_sql.empty else pd.DataFrame()
             g_total = int(g_base) + (int(prod['GOLPES'].sum()) if not prod.empty else 0)
 
-        limite = 30000
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
         # Guardamos en formato compatible para la generación PDF
         res_semaforo.append({
-            'CLIENTE': row.get('CLIENTE', '-'), 'PIEZA': row['RH'], 'OP': '-', 'TIPO': '-',
+            'CLIENTE': row.get('CLIENTE', '-'), 
+            'PIEZA': row['RH'], 
+            'OP': '-', 
+            'TIPO': tipo_matriz,
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
             'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
-            'GOLPES': g_total, 'LIMITE': limite, 'ESTADO': estado, 'COLOR': color
+            'GOLPES': g_total, 
+            'LIMITE': limite, 
+            'ESTADO': estado, 
+            'COLOR': color
         })
 
         if tiene_abierto:
             res_abiertos.append({
-                'CLIENTE': row.get('CLIENTE', '-'), 'PIEZA': row['RH'], 'OP': '-', 'TIPO': '-',
-                'TIPO_MANT_ABIERTO': tipo_abierto, 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
+                'CLIENTE': row.get('CLIENTE', '-'), 
+                'PIEZA': row['RH'], 
+                'OP': '-', 
+                'TIPO': tipo_matriz,
+                'TIPO_MANT_ABIERTO': tipo_abierto, 
+                'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
             })
 
     return pd.DataFrame(res_semaforo), pd.DataFrame(res_abiertos)
@@ -292,10 +313,12 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
+    
+    # Redimensionado de columnas para que entre "PROGRESIVAS FAU"
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(70, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
-    pdf.cell(12, 8, "OP", 1, 0, 'C', fill=True)
-    pdf.cell(12, 8, "Tipo", 1, 0, 'C', fill=True)
+    pdf.cell(60, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
+    pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
+    pdf.cell(24, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Corr.", 1, 0, 'C', fill=True)
     pdf.cell(26, 8, "Golpes Ac.", 1, 0, 'C', fill=True)
@@ -306,13 +329,21 @@ def build_pdf_main(df_resultados, df_abiertos):
     for _, row in df_resultados.iterrows():
         bg = (255, 180, 180) if row['COLOR'] == "ROJO" else (255, 240, 180) if row['COLOR'] == "AMARILLO" else (198, 239, 206)
         txt = (180, 0, 0) if row['COLOR'] == "ROJO" else (150, 100, 0) if row['COLOR'] == "AMARILLO" else (0, 100, 0)
+        
+        # Limpieza visual del tipo de matriz para la tabla
+        tipo_str = str(row['TIPO'])
+        if 'PROGRESIVAS FAU' in tipo_str or 'PROGRESIVA FAU' in tipo_str: tipo_str = 'PROG. FAU'
+        elif 'PROGRESIVA' in tipo_str: tipo_str = 'PROGRESIVA'
+        elif 'MECANICA' in tipo_str or 'MECÁNICA' in tipo_str: tipo_str = 'MECANICA'
+        
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(15, 7, str(row['CLIENTE']), 1, 0, 'C')
-        pdf.cell(70, 7, str(row['PIEZA'])[:45], 1, 0, 'L')
-        pdf.cell(12, 7, str(row['OP']), 1, 0, 'C')
-        pdf.cell(12, 7, str(row['TIPO']), 1, 0, 'C')
+        pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
+        pdf.cell(60, 7, str(row['PIEZA'])[:38], 1, 0, 'L')
+        pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
+        pdf.cell(24, 7, tipo_str[:12], 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_CORR']), 1, 0, 'C')
+        
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(26, 7, f"{row['GOLPES']:,}", 1, 0, 'C', fill=True)
         pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", '', 8)
@@ -334,8 +365,8 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
-            pdf.cell(25, 7, str(r['CLIENTE']), 1, 0, 'C')
-            pdf.cell(90, 7, str(r['PIEZA']), 1, 0, 'L')
+            pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C')
+            pdf.cell(90, 7, str(r['PIEZA'])[:55], 1, 0, 'L')
             pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
             pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C')
             pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
