@@ -39,7 +39,6 @@ def clean_str(val):
     return str(val).strip().upper()
 
 def get_best_match(texto, lista_candidatos, umbral=0.5):
-    """Encuentra la mejor coincidencia basada en caracteres compartidos."""
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     
@@ -60,9 +59,10 @@ def get_best_match(texto, lista_candidatos, umbral=0.5):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO ---
+    # --- A. CARGAR CATÁLOGO (LECTURA INFALIBLE) ---
     try:
-        df_cat_raw = pd.read_csv(URL_CATALOGO)
+        # Leemos sin asumir encabezados para no perder filas por accidente
+        df_cat_raw = pd.read_csv(URL_CATALOGO, header=None)
         header_idx = -1
         for i, row in df_cat_raw.iterrows():
             row_vals = " ".join([str(x).upper() for x in row.values])
@@ -70,8 +70,10 @@ def load_all_sources():
                 header_idx = i
                 break
                 
-        if header_idx != -1: df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx + 1).dropna(how='all')
-        else: df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
+        if header_idx != -1: 
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx).dropna(how='all')
+        else: 
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
 
         df_cat.columns = [str(c).upper().strip() for c in df_cat.columns]
         
@@ -152,7 +154,7 @@ def load_all_sources():
     return df_cat, df_sql, df_forms_all
 
 # ==========================================
-# 4. LÓGICA DE PROCESAMIENTO
+# 4. LÓGICA DE PROCESAMIENTO INTELIGENTE
 # ==========================================
 def procesar_datos(df_cat, df_sql, df_forms):
     res_semaforo = []
@@ -160,24 +162,36 @@ def procesar_datos(df_cat, df_sql, df_forms):
     hoy = datetime.now()
     inicio_anio = pd.to_datetime(f"{hoy.year}-01-01")
 
-    # Búsqueda flexible de la columna "TIPO"
+    # Buscamos la columna TIPO de forma flexible
     col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
 
     for _, row in df_cat.iterrows():
         p_key = row['PIEZA_KEY']
         if not row['RH'] or row['RH'] == '-': continue
         
-        # --- LÓGICA DE TIPO Y LÍMITES DINÁMICOS ---
+        # Obtenemos el cliente para cruzar lógicas
+        cliente = str(row.get('CLIENTE', '-')).strip().upper()
+        
+        # Obtenemos el tipo original
         val_tipo_original = row[col_tipo] if col_tipo else '-'
         if pd.isna(val_tipo_original) or str(val_tipo_original).strip().lower() in ['nan', 'none', '']:
             val_tipo_original = '-'
             
         tipo_matriz = str(val_tipo_original).strip().upper()
         
-        if 'PROGRESIVAS FAU' in tipo_matriz or 'PROGRESIVA FAU' in tipo_matriz: limite = 60000
-        elif 'PROGRESIVA' in tipo_matriz: limite = 40000
-        elif 'MECANICA' in tipo_matriz or 'MECÁNICA' in tipo_matriz: limite = 20000
-        else: limite = 30000
+        # --- LÓGICA INTELIGENTE DE LÍMITES DINÁMICOS ---
+        if 'PROGRESIVA' in tipo_matriz and ('FAU' in tipo_matriz or 'FAURECIA' in cliente):
+            limite = 60000
+            tipo_impreso = "PROG. FAU"
+        elif 'PROGRESIVA' in tipo_matriz:
+            limite = 40000
+            tipo_impreso = "PROGRESIVA"
+        elif 'MECANICA' in tipo_matriz or 'MECÁNICA' in tipo_matriz:
+            limite = 20000
+            tipo_impreso = "MECANICA"
+        else:
+            limite = 30000
+            tipo_impreso = str(val_tipo_original).strip() if val_tipo_original != '-' else '-'
             
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
@@ -218,12 +232,11 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
-        # Guardamos en formato compatible para la generación PDF
         res_semaforo.append({
             'CLIENTE': row.get('CLIENTE', '-'), 
             'PIEZA': row['RH'], 
             'OP': '-', 
-            'TIPO': str(val_tipo_original).strip(),
+            'TIPO': tipo_impreso,
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
             'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
             'GOLPES': g_total, 
@@ -237,7 +250,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 'CLIENTE': row.get('CLIENTE', '-'), 
                 'PIEZA': row['RH'], 
                 'OP': '-', 
-                'TIPO': str(val_tipo_original).strip(),
+                'TIPO': tipo_impreso,
                 'TIPO_MANT_ABIERTO': tipo_abierto, 
                 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
             })
@@ -295,14 +308,11 @@ def build_pdf_main(df_resultados, df_abiertos):
         bg = (255, 180, 180) if row['COLOR'] == "ROJO" else (255, 240, 180) if row['COLOR'] == "AMARILLO" else (198, 239, 206)
         txt = (180, 0, 0) if row['COLOR'] == "ROJO" else (150, 100, 0) if row['COLOR'] == "AMARILLO" else (0, 100, 0)
         
-        tipo_str = str(row['TIPO']) # Muestra textualmente el valor del catalogo
-        if tipo_str.upper() in ['NAN', 'NONE', '']: tipo_str = '-'
-        
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
         pdf.cell(60, 7, str(row['PIEZA'])[:38], 1, 0, 'L')
         pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
-        pdf.cell(24, 7, tipo_str[:15], 1, 0, 'C') 
+        pdf.cell(24, 7, str(row['TIPO'])[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_CORR']), 1, 0, 'C')
         
@@ -449,6 +459,7 @@ with st.spinner("Conectando con Google Sheets y SQL..."):
 if not df_cat.empty:
     with st.expander("🛠️ PANEL DE DIAGNÓSTICO INTERNO"):
         st.write(f"Total filas en Catálogo: {len(df_cat)} | Total filas SQL: {len(df_sql)} | Total forms: {len(df_forms)}")
+        st.write(f"Columnas detectadas en Catálogo: {', '.join(df_cat.columns)}")
         
     if st.button("⚙️ Procesar Datos de Matrices y Generar PDFs", use_container_width=True, type="primary"):
         with st.spinner("Calculando estado de matrices y renderizando documentos..."):
