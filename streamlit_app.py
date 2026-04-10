@@ -21,6 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
+st.success("🟢 VERSIÓN ACTUALIZADA: LÍMITES INTELIGENTES ACTIVADOS (60k, 40k, 20k)")
 st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -41,10 +42,8 @@ def clean_str(val):
 def get_best_match(texto, lista_candidatos, umbral=0.5):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
-    
     mejor_coincidencia = val
     mejor_puntaje = 0.0
-    
     for candidato in lista_candidatos:
         cand_str = clean_str(candidato)
         if not cand_str: continue
@@ -52,9 +51,7 @@ def get_best_match(texto, lista_candidatos, umbral=0.5):
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
             mejor_coincidencia = cand_str
-            
-    if mejor_puntaje >= umbral:
-        return mejor_coincidencia
+    if mejor_puntaje >= umbral: return mejor_coincidencia
     return val
 
 @st.cache_data(ttl=60)
@@ -62,18 +59,16 @@ def load_all_sources():
     # --- A. CARGAR CATÁLOGO ---
     try:
         df_cat_raw = pd.read_csv(URL_CATALOGO, header=None, dtype=str)
-        header_idx = -1
+        header_idx = 0
         
+        # Búsqueda dinámica del encabezado
         for i, row in df_cat_raw.iterrows():
             row_str = " ".join(row.fillna("").astype(str).str.upper().values)
             if 'RH' in row_str and 'CLIENTE' in row_str:
                 header_idx = i
                 break
                 
-        if header_idx != -1: 
-            df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx).dropna(how='all')
-        else: 
-            df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
+        df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx).dropna(how='all')
 
         # Limpiar espacios extra y normalizar encabezados
         df_cat.columns = [re.sub(r'\s+', ' ', str(c)).strip().upper() for c in df_cat.columns]
@@ -157,7 +152,7 @@ def load_all_sources():
     return df_cat, df_sql, df_forms_all
 
 # ==========================================
-# 4. LÓGICA DE PROCESAMIENTO A PRUEBA DE FALLOS
+# 4. LÓGICA DE PROCESAMIENTO INFALIBLE
 # ==========================================
 def procesar_datos(df_cat, df_sql, df_forms):
     res_semaforo = []
@@ -165,49 +160,41 @@ def procesar_datos(df_cat, df_sql, df_forms):
     hoy = datetime.now()
     inicio_anio = pd.to_datetime(f"{hoy.year}-01-01")
 
-    # Identificación a prueba de balas de la columna "TIPO"
-    col_tipo = None
-    for c in df_cat.columns:
-        if c == 'TIPO':
-            col_tipo = c; break
-    if not col_tipo:
-        for c in df_cat.columns:
-            if 'TIPO' in c or 'MATRIZ' in c:
-                col_tipo = c; break
-
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
         
-        # --- LÓGICA INFALIBLE DE LECTURA DE TIPO Y CLIENTE ---
+        # Extracción segura de Cliente
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
+        if cliente in ['NAN', 'NONE', '']: cliente = '-'
         
-        # Leer valor de tipo de la columna detectada o forzar la 3era columna (index 2)
-        val_tipo_original = str(row.get(col_tipo, '')).strip()
-        if not val_tipo_original or val_tipo_original.lower() in ['nan', 'none']:
+        # Extracción segura de Tipo (buscando 'TIPO' o forzando índice 2)
+        tipo_matriz = "-"
+        for c in row.index:
+            if 'TIPO' in str(c).upper() or 'MATRIZ' in str(c).upper():
+                tipo_matriz = str(row[c]).strip().upper()
+                break
+        
+        if tipo_matriz in ["-", "NAN", "NONE", ""]:
             try:
-                val_tipo_original = str(row.iloc[2]).strip()
+                tipo_matriz = str(row.iloc[2]).strip().upper()
             except:
-                val_tipo_original = '-'
-                
-        if not val_tipo_original or val_tipo_original.lower() in ['nan', 'none']:
-            val_tipo_original = '-'
-            
-        tipo_matriz = val_tipo_original.upper()
+                tipo_matriz = "-"
         
-        # --- LÍMITES DINÁMICOS SEGÚN REGLAS ---
-        if 'PROGRESIVA' in tipo_matriz and ('FAU' in tipo_matriz or 'FAURECIA' in cliente):
-            limite = 60000
-            tipo_impreso = "PROG. FAU"
-        elif 'PROGRESIVA' in tipo_matriz:
-            limite = 40000
-            tipo_impreso = "PROGRESIVA"
-        elif 'MECANICA' in tipo_matriz or 'MECÁNICA' in tipo_matriz:
+        # --- LÓGICA INTELIGENTE DE LÍMITES DINÁMICOS ---
+        if 'PROG' in tipo_matriz:
+            if 'FAU' in tipo_matriz or 'FAURECIA' in cliente:
+                limite = 60000
+                tipo_impreso = "PROG. FAU"
+            else:
+                limite = 40000
+                tipo_impreso = "PROGRESIVA"
+        elif 'MEC' in tipo_matriz:
             limite = 20000
             tipo_impreso = "MECANICA"
         else:
             limite = 30000
-            tipo_impreso = val_tipo_original if val_tipo_original != '-' else '-'
+            tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
             
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
@@ -248,12 +235,12 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
-        # Formatear el diccionario con seguridad anti-NaN
+        # Guardamos en formato compatible para la generación PDF
         res_semaforo.append({
-            'CLIENTE': str(cliente) if cliente != 'NAN' else '-', 
+            'CLIENTE': cliente, 
             'PIEZA': str(row['RH']), 
             'OP': '-', 
-            'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
+            'TIPO': tipo_impreso,
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
             'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
             'GOLPES': g_total, 
@@ -264,9 +251,10 @@ def procesar_datos(df_cat, df_sql, df_forms):
 
         if tiene_abierto:
             res_abiertos.append({
-                'CLIENTE': str(cliente) if cliente != 'NAN' else '-', 
+                'CLIENTE': cliente, 
                 'PIEZA': str(row['RH']), 
                 'OP': '-', 
+                'TIPO': tipo_impreso,
                 'TIPO_MANT_ABIERTO': tipo_abierto, 
                 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
             })
@@ -300,11 +288,16 @@ class PDFResumen(FPDF):
 
 def build_pdf_main(df_resultados, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
-    pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     
-    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
+    # --- HOJA 1: DETALLE ---
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Anchos ajustados para que no se superpongan las palabras "PROG. FAU"
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(31, 73, 125)
+    pdf.set_text_color(255, 255, 255)
+    
+    # Redimensionado para dar espacio a "PROGRESIVA"
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(56, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
@@ -370,7 +363,7 @@ def build_pdf_resumen(df_resultados):
     
     pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
-        pdf.set_x(mx); pdf.cell(35, 6, r['CLIENTE'], 1, 0, 'C'); pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
+        pdf.set_x(mx); pdf.cell(35, 6, r['CLIENTE'][:15], 1, 0, 'C'); pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
         pdf.cell(35, 6, str(r['OK']), 1, 0, 'C'); pdf.cell(35, 6, str(r['NOK']), 1, 0, 'C')
         pdf.cell(40, 6, r['POK'], 1, 0, 'C'); pdf.cell(40, 6, r['PNOK'], 1, 1, 'C')
         
@@ -417,6 +410,7 @@ with st.spinner("Conectando con Google Sheets y SQL..."):
 if not df_cat.empty:
     with st.expander("🛠️ PANEL DE DIAGNÓSTICO INTERNO"):
         st.write(f"Total filas en Catálogo: {len(df_cat)} | Total filas SQL: {len(df_sql)} | Total forms: {len(df_forms)}")
+        st.write(f"Columnas detectadas: {list(df_cat.columns)}")
         
     if st.button("⚙️ Procesar Datos de Matrices y Generar PDFs", use_container_width=True, type="primary"):
         with st.spinner("Calculando estado de matrices y renderizando documentos..."):
