@@ -39,6 +39,7 @@ def clean_str(val):
     return str(val).strip().upper()
 
 def get_best_match(texto, lista_candidatos, umbral=0.5):
+    """Encuentra la mejor coincidencia basada en caracteres compartidos."""
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     
@@ -59,14 +60,15 @@ def get_best_match(texto, lista_candidatos, umbral=0.5):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO (LECTURA INFALIBLE) ---
+    # --- A. CARGAR CATÁLOGO (CON LECTURA ROBUSTA DE LA PESTAÑA MATRICES) ---
     try:
-        # Leemos sin asumir encabezados para no perder filas por accidente
-        df_cat_raw = pd.read_csv(URL_CATALOGO, header=None)
+        # Leemos sin encabezados primero para ubicar la fila correcta
+        df_cat_raw = pd.read_csv(URL_CATALOGO, header=None, dtype=str)
         header_idx = -1
+        
         for i, row in df_cat_raw.iterrows():
-            row_vals = " ".join([str(x).upper() for x in row.values])
-            if 'RH' in row_vals and 'CLIENTE' in row_vals:
+            row_str = " ".join(row.fillna("").astype(str).str.upper().values)
+            if 'RH' in row_str and 'CLIENTE' in row_str:
                 header_idx = i
                 break
                 
@@ -75,12 +77,16 @@ def load_all_sources():
         else: 
             df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
 
-        df_cat.columns = [str(c).upper().strip() for c in df_cat.columns]
+        # Limpiamos exhaustivamente los nombres de columnas para que coincidan siempre
+        df_cat.columns = [re.sub(r'\s+', ' ', str(c)).strip().upper() for c in df_cat.columns]
         
-        if 'RH' in df_cat.columns:
-            df_cat = df_cat.dropna(subset=['RH'])
-            df_cat = df_cat[df_cat['RH'].astype(str).str.strip() != '']
-            df_cat['PIEZA_KEY'] = df_cat['RH'].apply(clean_str)
+        col_rh = next((c for c in df_cat.columns if 'RH' in c), None)
+        
+        if col_rh:
+            df_cat = df_cat.dropna(subset=[col_rh])
+            df_cat = df_cat[df_cat[col_rh].astype(str).str.strip() != '']
+            df_cat['PIEZA_KEY'] = df_cat[col_rh].apply(clean_str)
+            df_cat['RH'] = df_cat[col_rh] # Normalizar nombre para el resto del sistema
         else:
             st.error("❌ No se encontró la columna 'RH' en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -154,7 +160,7 @@ def load_all_sources():
     return df_cat, df_sql, df_forms_all
 
 # ==========================================
-# 4. LÓGICA DE PROCESAMIENTO INTELIGENTE
+# 4. LÓGICA DE PROCESAMIENTO
 # ==========================================
 def procesar_datos(df_cat, df_sql, df_forms):
     res_semaforo = []
@@ -162,33 +168,37 @@ def procesar_datos(df_cat, df_sql, df_forms):
     hoy = datetime.now()
     inicio_anio = pd.to_datetime(f"{hoy.year}-01-01")
 
-    # Buscamos la columna TIPO de forma flexible
-    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
+    # Búsqueda ultra flexible de la columna TIPO (por si cambia de nombre)
+    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c or 'MATRIZ' in c), None)
+    if not col_tipo and len(df_cat.columns) >= 3:
+        col_tipo = df_cat.columns[2]
 
     for _, row in df_cat.iterrows():
         p_key = row['PIEZA_KEY']
         if not row['RH'] or row['RH'] == '-': continue
         
-        # Obtenemos el cliente para cruzar lógicas
+        # --- LÓGICA DE TIPO Y LÍMITES DINÁMICOS CRUZADA CON CLIENTE ---
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         
-        # Obtenemos el tipo original
-        val_tipo_original = row[col_tipo] if col_tipo else '-'
+        val_tipo_original = row[col_tipo] if col_tipo and col_tipo in row else '-'
         if pd.isna(val_tipo_original) or str(val_tipo_original).strip().lower() in ['nan', 'none', '']:
             val_tipo_original = '-'
             
         tipo_matriz = str(val_tipo_original).strip().upper()
         
-        # --- LÓGICA INTELIGENTE DE LÍMITES DINÁMICOS ---
+        # Si es Progresiva y (es Faurecia o dice FAU) = 60.000
         if 'PROGRESIVA' in tipo_matriz and ('FAU' in tipo_matriz or 'FAURECIA' in cliente):
             limite = 60000
             tipo_impreso = "PROG. FAU"
+        # Si es Progresiva normal = 40.000
         elif 'PROGRESIVA' in tipo_matriz:
             limite = 40000
             tipo_impreso = "PROGRESIVA"
+        # Si es Mecánica = 20.000
         elif 'MECANICA' in tipo_matriz or 'MECÁNICA' in tipo_matriz:
             limite = 20000
             tipo_impreso = "MECANICA"
+        # Default de seguridad
         else:
             limite = 30000
             tipo_impreso = str(val_tipo_original).strip() if val_tipo_original != '-' else '-'
