@@ -21,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ VERSIÓN INFALIBLE ACTIVADA: Leyendo los tipos de matriz directamente desde la 3° columna (C3).")
+st.success("✅ MOTOR INFALIBLE DE LECTURA ACTIVADO: Buscando tipos de matriz en toda la fila.")
 st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -56,7 +56,7 @@ def get_best_match(texto, lista_candidatos, umbral=0.5):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO (FORZANDO LA POSICIÓN DE LAS COLUMNAS) ---
+    # --- A. CARGAR CATÁLOGO (MÉTODO ROBUSTO) ---
     try:
         df_cat_raw = pd.read_csv(URL_CATALOGO, header=None, dtype=str)
         header_idx = -1
@@ -72,7 +72,6 @@ def load_all_sources():
         else: 
             df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
 
-        # Limpiamos los nombres pero preservamos el orden de las columnas (A, B, C...)
         df_cat.columns = [re.sub(r'\s+', ' ', str(c)).strip().upper() for c in df_cat.columns]
         
         col_rh = next((c for c in df_cat.columns if 'RH' in c), None)
@@ -162,26 +161,32 @@ def procesar_datos(df_cat, df_sql, df_forms):
     hoy = datetime.now()
     inicio_anio = pd.to_datetime(f"{hoy.year}-01-01")
 
-    # Identificamos directamente la columna 3 del Excel (Índice 2)
-    col_tipo = df_cat.columns[2] if len(df_cat.columns) >= 3 else None
-    col_cliente = df_cat.columns[1] if len(df_cat.columns) >= 2 else None
-
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
         
-        # Extracción segura de Cliente (Columna B)
-        cliente = str(row[col_cliente]).strip().upper() if col_cliente else '-'
-        if cliente in ['NAN', 'NONE', '']: cliente = '-'
+        # 1. Búsqueda de Cliente segura
+        cliente = ""
+        for c in df_cat.columns:
+            if 'CLIENT' in c:
+                cliente = str(row[c]).strip().upper()
+                break
+        if not cliente or cliente in ['NAN', 'NONE']: cliente = '-'
         
-        # Extracción forzada del TIPO directamente desde la celda de la columna C
-        val_tipo_original = str(row[col_tipo]).strip() if col_tipo else '-'
-        if val_tipo_original.lower() in ['nan', 'none', '']:
-            val_tipo_original = '-'
-            
-        tipo_matriz = val_tipo_original.upper()
+        # 2. Búsqueda de Tipo escaneando toda la fila entera
+        tipo_matriz = ""
+        for val in row.values:
+            v_str = str(val).strip().upper()
+            if 'PROG' in v_str or 'MECANICA' in v_str or 'MECÁNICA' in v_str:
+                tipo_matriz = v_str
+                break
+                
+        # Si aún no lo encuentra, forzar lectura de columna TIPO clásica
+        if not tipo_matriz:
+            col_t = next((c for c in df_cat.columns if 'TIPO' in c or 'MATRIZ' in c), None)
+            if col_t: tipo_matriz = str(row[col_t]).strip().upper()
         
-        # --- LÓGICA DE LÍMITES DINÁMICOS SEGÚN LA REGLA ---
+        # --- LÓGICA DE LÍMITES DINÁMICOS CRUZADA CON CLIENTE ---
         if 'PROG' in tipo_matriz:
             if 'FAU' in tipo_matriz or 'FAURECIA' in cliente:
                 limite = 60000
@@ -194,7 +199,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
             tipo_impreso = "MECANICA"
         else:
             limite = 30000
-            tipo_impreso = val_tipo_original if val_tipo_original != '-' else '-'
+            tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', '', 'NAT'] else '-'
             
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
@@ -235,7 +240,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
-        # Guardamos en formato compatible para la generación PDF
+        # Guardamos en formato seguro
         res_semaforo.append({
             'CLIENTE': cliente, 
             'PIEZA': str(row['RH']), 
@@ -311,11 +316,14 @@ def build_pdf_main(df_resultados, df_abiertos):
         bg = (255, 180, 180) if row['COLOR'] == "ROJO" else (255, 240, 180) if row['COLOR'] == "AMARILLO" else (198, 239, 206)
         txt = (180, 0, 0) if row['COLOR'] == "ROJO" else (150, 100, 0) if row['COLOR'] == "AMARILLO" else (0, 100, 0)
         
+        tipo_str = str(row['TIPO']) 
+        if not tipo_str or tipo_str.upper() in ['NAN', 'NONE', '']: tipo_str = '-'
+        
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
         pdf.cell(56, 7, str(row['PIEZA'])[:38], 1, 0, 'L')
         pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
-        pdf.cell(28, 7, str(row['TIPO'])[:15], 1, 0, 'C') 
+        pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_CORR']), 1, 0, 'C')
         
