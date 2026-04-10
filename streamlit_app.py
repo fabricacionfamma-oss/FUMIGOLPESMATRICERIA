@@ -21,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("🟢 VERSIÓN ACTUALIZADA: LÍMITES INTELIGENTES ACTIVADOS (60k, 40k, 20k)")
+st.success("✅ VERSIÓN INFALIBLE ACTIVADA: Leyendo los tipos de matriz directamente desde la 3° columna (C3).")
 st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -56,21 +56,23 @@ def get_best_match(texto, lista_candidatos, umbral=0.5):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO ---
+    # --- A. CARGAR CATÁLOGO (FORZANDO LA POSICIÓN DE LAS COLUMNAS) ---
     try:
         df_cat_raw = pd.read_csv(URL_CATALOGO, header=None, dtype=str)
-        header_idx = 0
+        header_idx = -1
         
-        # Búsqueda dinámica del encabezado
         for i, row in df_cat_raw.iterrows():
             row_str = " ".join(row.fillna("").astype(str).str.upper().values)
             if 'RH' in row_str and 'CLIENTE' in row_str:
                 header_idx = i
                 break
                 
-        df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx).dropna(how='all')
+        if header_idx != -1: 
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx).dropna(how='all')
+        else: 
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
 
-        # Limpiar espacios extra y normalizar encabezados
+        # Limpiamos los nombres pero preservamos el orden de las columnas (A, B, C...)
         df_cat.columns = [re.sub(r'\s+', ' ', str(c)).strip().upper() for c in df_cat.columns]
         
         col_rh = next((c for c in df_cat.columns if 'RH' in c), None)
@@ -160,28 +162,26 @@ def procesar_datos(df_cat, df_sql, df_forms):
     hoy = datetime.now()
     inicio_anio = pd.to_datetime(f"{hoy.year}-01-01")
 
+    # Identificamos directamente la columna 3 del Excel (Índice 2)
+    col_tipo = df_cat.columns[2] if len(df_cat.columns) >= 3 else None
+    col_cliente = df_cat.columns[1] if len(df_cat.columns) >= 2 else None
+
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
         
-        # Extracción segura de Cliente
-        cliente = str(row.get('CLIENTE', '-')).strip().upper()
+        # Extracción segura de Cliente (Columna B)
+        cliente = str(row[col_cliente]).strip().upper() if col_cliente else '-'
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
         
-        # Extracción segura de Tipo (buscando 'TIPO' o forzando índice 2)
-        tipo_matriz = "-"
-        for c in row.index:
-            if 'TIPO' in str(c).upper() or 'MATRIZ' in str(c).upper():
-                tipo_matriz = str(row[c]).strip().upper()
-                break
+        # Extracción forzada del TIPO directamente desde la celda de la columna C
+        val_tipo_original = str(row[col_tipo]).strip() if col_tipo else '-'
+        if val_tipo_original.lower() in ['nan', 'none', '']:
+            val_tipo_original = '-'
+            
+        tipo_matriz = val_tipo_original.upper()
         
-        if tipo_matriz in ["-", "NAN", "NONE", ""]:
-            try:
-                tipo_matriz = str(row.iloc[2]).strip().upper()
-            except:
-                tipo_matriz = "-"
-        
-        # --- LÓGICA INTELIGENTE DE LÍMITES DINÁMICOS ---
+        # --- LÓGICA DE LÍMITES DINÁMICOS SEGÚN LA REGLA ---
         if 'PROG' in tipo_matriz:
             if 'FAU' in tipo_matriz or 'FAURECIA' in cliente:
                 limite = 60000
@@ -194,7 +194,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
             tipo_impreso = "MECANICA"
         else:
             limite = 30000
-            tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
+            tipo_impreso = val_tipo_original if val_tipo_original != '-' else '-'
             
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
@@ -240,7 +240,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
             'CLIENTE': cliente, 
             'PIEZA': str(row['RH']), 
             'OP': '-', 
-            'TIPO': tipo_impreso,
+            'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
             'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
             'GOLPES': g_total, 
@@ -254,7 +254,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 'CLIENTE': cliente, 
                 'PIEZA': str(row['RH']), 
                 'OP': '-', 
-                'TIPO': tipo_impreso,
                 'TIPO_MANT_ABIERTO': tipo_abierto, 
                 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
             })
@@ -297,7 +296,6 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
     
-    # Redimensionado para dar espacio a "PROGRESIVA"
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(56, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
@@ -363,7 +361,7 @@ def build_pdf_resumen(df_resultados):
     
     pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
-        pdf.set_x(mx); pdf.cell(35, 6, r['CLIENTE'][:15], 1, 0, 'C'); pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
+        pdf.set_x(mx); pdf.cell(35, 6, r['CLIENTE'], 1, 0, 'C'); pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
         pdf.cell(35, 6, str(r['OK']), 1, 0, 'C'); pdf.cell(35, 6, str(r['NOK']), 1, 0, 'C')
         pdf.cell(40, 6, r['POK'], 1, 0, 'C'); pdf.cell(40, 6, r['PNOK'], 1, 1, 'C')
         
@@ -410,7 +408,6 @@ with st.spinner("Conectando con Google Sheets y SQL..."):
 if not df_cat.empty:
     with st.expander("🛠️ PANEL DE DIAGNÓSTICO INTERNO"):
         st.write(f"Total filas en Catálogo: {len(df_cat)} | Total filas SQL: {len(df_sql)} | Total forms: {len(df_forms)}")
-        st.write(f"Columnas detectadas: {list(df_cat.columns)}")
         
     if st.button("⚙️ Procesar Datos de Matrices y Generar PDFs", use_container_width=True, type="primary"):
         with st.spinner("Calculando estado de matrices y renderizando documentos..."):
