@@ -227,7 +227,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
             prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= inicio_anio)] if not df_sql.empty else pd.DataFrame()
             g_total = int(g_base) + (int(prod['GOLPES'].sum()) if not prod.empty else 0)
 
-        limite = 20000
+        limite = 30000
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
