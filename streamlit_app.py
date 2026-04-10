@@ -60,6 +60,7 @@ def get_best_match(texto, lista_candidatos, umbral=0.5):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
+    # --- A. CARGAR CATÁLOGO ---
     try:
         df_cat_raw = pd.read_csv(URL_CATALOGO)
         header_idx = -1
@@ -88,6 +89,7 @@ def load_all_sources():
 
     catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
 
+    # --- B. CARGAR FORMS ---
     def fetch_forms(url, tipo_mant):
         try:
             df_raw = pd.read_csv(url)
@@ -136,6 +138,7 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
+    # --- C. SQL (PRODUCCIÓN) ---
     try:
         conn = st.connection("wii_bi", type="sql")
         q = "SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES FROM PROD_D_01 p JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Date >= '2023-01-01' GROUP BY pr.Code, CAST(p.Date as DATE)"
@@ -161,6 +164,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         p_key = row['PIEZA_KEY']
         if not row['RH'] or row['RH'] == '-': continue
         
+        # --- LÓGICA DE LÍMITES POR TIPO DE MATRIZ ---
         tipo_matriz = str(row.get('TIPO', '-')).strip().upper()
         
         if 'PROGRESIVAS FAU' in tipo_matriz or 'PROGRESIVA FAU' in tipo_matriz: limite = 60000
@@ -172,6 +176,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
         g_base = g_base if pd.notna(g_base) else 0
 
+        # Lógica de Mantenimientos por Pieza
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
@@ -206,6 +211,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
+        # Guardamos en formato compatible para la generación PDF
         res_semaforo.append({
             'CLIENTE': row.get('CLIENTE', '-'), 'PIEZA': row['RH'], 'OP': '-', 'TIPO': str(row.get('TIPO', '-')).strip(),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
@@ -248,9 +254,15 @@ class PDFResumen(FPDF):
 
 def build_pdf_main(df_resultados, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
-    pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     
-    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
+    # --- HOJA 1: DETALLE ---
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(31, 73, 125)
+    pdf.set_text_color(255, 255, 255)
+    
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(60, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
@@ -266,7 +278,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         bg = (255, 180, 180) if row['COLOR'] == "ROJO" else (255, 240, 180) if row['COLOR'] == "AMARILLO" else (198, 239, 206)
         txt = (180, 0, 0) if row['COLOR'] == "ROJO" else (150, 100, 0) if row['COLOR'] == "AMARILLO" else (0, 100, 0)
         
-        tipo_str = str(row['TIPO']) # Se imprime textualmente el valor del catalogo
+        tipo_str = str(row['TIPO']) # Muestra textualmente el valor del catalogo
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
@@ -283,6 +295,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
+    # --- HOJA 2: ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0); pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True); pdf.ln(3)
@@ -293,39 +306,6 @@ def build_pdf_main(df_resultados, df_abiertos):
         for _, r in df_abiertos.iterrows():
             pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C'); pdf.cell(90, 7, str(r['PIEZA'])[:55], 1, 0, 'L'); pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
             pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C'); pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
-
-    # --- HOJA 3: RESUMEN POR CLIENTE ---
-    pdf.add_page(); pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
-    pdf.cell(0, 10, "RESUMEN DE ESTADO POR CLIENTE", border=0, ln=True, align='C'); pdf.ln(5)
-
-    resumen_data = []
-    total_gen = len(df_resultados); total_ok = len(df_resultados[df_resultados['COLOR'] == 'VERDE']); total_nok = total_gen - total_ok
-
-    for c in sorted([x for x in df_resultados['CLIENTE'].unique() if str(x).strip() not in ["", "-"]]):
-        df_c = df_resultados[df_resultados['CLIENTE'] == c]
-        tot = len(df_c); ok = len(df_c[df_c['COLOR'] == 'VERDE']); nok = tot - ok
-        if tot > 0:
-            resumen_data.append({'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"})
-
-    if resumen_data:
-        pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255); mx = 43.5; pdf.set_x(mx)
-        pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(25, 6, "TOTAL PIEZAS", 1, 0, 'C', fill=True)
-        pdf.cell(35, 6, "OK / CON PREV.", 1, 0, 'C', fill=True); pdf.cell(35, 6, "ALERTA / VENCIDO", 1, 0, 'C', fill=True)
-        pdf.cell(40, 6, "% OK", 1, 0, 'C', fill=True); pdf.cell(40, 6, "% NO OK", 1, 1, 'C', fill=True)
-        
-        pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
-        for r in resumen_data:
-            pdf.set_x(mx); pdf.cell(35, 6, r['CLIENTE'][:15], 1, 0, 'C'); pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
-            pdf.cell(35, 6, str(r['OK']), 1, 0, 'C'); pdf.cell(35, 6, str(r['NOK']), 1, 0, 'C')
-            pdf.cell(40, 6, r['POK'], 1, 0, 'C'); pdf.cell(40, 6, r['PNOK'], 1, 1, 'C')
-            
-        pdf.set_x(mx); pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(220, 220, 220)
-        pdf.cell(35, 6, "TOTAL", 1, 0, 'C', fill=True); pdf.cell(25, 6, str(total_gen), 1, 0, 'C', fill=True)
-        pdf.cell(35, 6, str(total_ok), 1, 0, 'C', fill=True); pdf.cell(35, 6, str(total_nok), 1, 0, 'C', fill=True)
-        pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
-        pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
-    else:
-        pdf.set_font("Arial", 'I', 10); pdf.set_text_color(100, 100, 100); pdf.cell(0, 10, "No hay datos de clientes registrados.", ln=True, align='C')
 
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name)
