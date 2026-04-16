@@ -10,6 +10,17 @@ from plotly.subplots import make_subplots
 from fpdf import FPDF
 
 # ==========================================
+# 0. MAPEO DE MÁQUINAS (EXCLUSIVO ESTAMPADO)
+# ==========================================
+MAQUINAS_ESTAMPADO = [
+    "P-023", "P-024", "P-025", "P-026", "P-027", "P-028", "P-029", "P-030",
+    "BAL-002", "BAL-003", "BAL-005", "BAL-006", "BAL-007", "BAL-008", "BAL-009", 
+    "BAL-010", "BAL-011", "BAL-012", "BAL-013", "BAL-014", "BAL-015",
+    "P-011", "P-012", "P-013", "P-014", "P-016", "P-017", "P-018", 
+    "P-015", "P-019", "P-020", "P-021", "P-022", "GOF01"
+]
+
+# ==========================================
 # 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
 st.set_page_config(page_title="Control de Golpes de Matrices - Fumiscor", layout="wide", page_icon="⚙️")
@@ -21,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ MOTOR INFALIBLE ACTIVADO: Coincidencia Casi Exacta (98%) - Previene la mezcla de piezas LH y RH.")
+st.success("✅ MOTOR INFALIBLE ACTIVADO: Coincidencia Casi Exacta (98%) y Filtro Exclusivo de Sector (Estampado Oficial).")
 st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -37,18 +48,14 @@ URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5p
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
-    # Removemos espacios en blanco para que "FAU 17575" sea igual a "FAU17575"
     return str(val).strip().upper().replace(" ", "")
 
 def get_best_match(texto, lista_candidatos, umbral=0.98):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     
-    # 1. Prioridad absoluta: Coincidencia exacta
     if val in lista_candidatos: return val
     
-    # 2. Coincidencia Casi Exacta (98%)
-    # Un umbral del 98% evita que FAU17575 (RH) se sume con FAU17576 (LH)
     mejor_coincidencia = val
     mejor_puntaje = 0.0
 
@@ -62,7 +69,6 @@ def get_best_match(texto, lista_candidatos, umbral=0.98):
             mejor_coincidencia = cand_str
             
     if mejor_puntaje >= umbral: return mejor_coincidencia
-    # Si la pieza de SQL no coincide casi exactamente con el catálogo, no se asigna a nadie
     return val
 
 @st.cache_data(ttl=60)
@@ -150,26 +156,35 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
-    # --- C. SQL (PRODUCCIÓN) ---
+    # --- C. SQL (PRODUCCIÓN FILTRADA POR SECTOR) ---
     try:
         conn = st.connection("wii_bi", type="sql")
+        
         q = """
-        SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES 
+        SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, c.Name as MAQUINA, SUM(p.Good + p.Rework) as GOLPES 
         FROM PROD_D_01 p 
         JOIN PRODUCT pr ON p.ProductId = pr.ProductId 
+        JOIN CELL c ON p.CellId = c.CellId
         WHERE p.Date >= '2023-01-01' 
-        GROUP BY pr.Code, CAST(p.Date as DATE)
+        GROUP BY pr.Code, CAST(p.Date as DATE), c.Name
         """
         df_sql = conn.query(q)
         
-        # Filtros de seguridad extrema para SQL
+        # 1. Filtro estricto: Dejamos SOLAMENTE las máquinas que pertenecen a Estampado
+        df_sql = df_sql[df_sql['MAQUINA'].isin(MAQUINAS_ESTAMPADO)]
+        
+        # 2. Re-agrupamos sumando los golpes de las máquinas válidas
+        df_sql = df_sql.groupby(['PIEZA', 'FECHA'])['GOLPES'].sum().reset_index()
+        
         df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
         df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
         
         piezas_unicas_sql = df_sql['PIEZA'].unique()
         mapeo_piezas = {p: get_best_match(p, catalogo_piezas) for p in piezas_unicas_sql}
         df_sql['PIEZA_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
-    except: df_sql = pd.DataFrame()
+    except Exception as e: 
+        st.error(f"Error de conexión o lectura SQL: {e}")
+        df_sql = pd.DataFrame()
 
     return df_cat, df_sql, df_forms_all
 
@@ -420,7 +435,7 @@ with st.spinner("Conectando con Google Sheets y SQL..."):
 
 if not df_cat.empty:
     with st.expander("🛠️ PANEL DE DIAGNÓSTICO INTERNO"):
-        st.write(f"Total filas en Catálogo: {len(df_cat)} | Total filas SQL: {len(df_sql)} | Total forms: {len(df_forms)}")
+        st.write(f"Total filas en Catálogo: {len(df_cat)} | Total filas SQL (Filtradas Estampado): {len(df_sql)} | Total forms: {len(df_forms)}")
         
     if st.button("⚙️ Procesar Datos de Matrices y Generar PDFs", use_container_width=True, type="primary"):
         with st.spinner("Calculando estado de matrices y renderizando documentos..."):
