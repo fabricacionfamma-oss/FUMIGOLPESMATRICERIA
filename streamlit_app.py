@@ -39,18 +39,37 @@ def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper()
 
-def get_best_match(texto, lista_candidatos, umbral=0.5):
+def get_best_match(texto, lista_candidatos, umbral=0.8):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
+    
+    # 1. Prioridad absoluta: Coincidencia exacta
+    if val in lista_candidatos: return val
+    
     mejor_coincidencia = val
     mejor_puntaje = 0.0
+    
+    # Extractor de Operación (ej. OP10, -20, OP-30) para evitar mezclar fases
+    def get_op_suffix(s):
+        m = re.search(r'(?:OP|OP-|-)0*(\d{2,3})$', s.strip())
+        return m.group(1) if m else None
+
+    op_val = get_op_suffix(val)
+
     for candidato in lista_candidatos:
         cand_str = clean_str(candidato)
         if not cand_str: continue
+        
+        # Anti-colisión de Operaciones: Rechaza la similitud si difieren en la OP
+        op_cand = get_op_suffix(cand_str)
+        if op_val and op_cand and op_val != op_cand:
+            continue 
+            
         puntaje = SequenceMatcher(None, val, cand_str).ratio()
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
             mejor_coincidencia = cand_str
+            
     if mejor_puntaje >= umbral: return mejor_coincidencia
     return val
 
@@ -181,31 +200,26 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 tipo_matriz = v_str
                 break
                 
-        # Si aún no lo encuentra, forzar lectura de columna TIPO clásica
         if not tipo_matriz:
             col_t = next((c for c in df_cat.columns if 'TIPO' in c or 'MATRIZ' in c), None)
             if col_t: tipo_matriz = str(row[col_t]).strip().upper()
         
-        # --- LÓGICA DE LÍMITES DINÁMICOS CRUZADA CON CLIENTE ---
+        # LÍMITES DINÁMICOS
         if 'PROG' in tipo_matriz:
             if 'FAU' in tipo_matriz or 'FAURECIA' in cliente:
-                limite = 60000
-                tipo_impreso = "PROG. FAU"
+                limite = 60000; tipo_impreso = "PROG. FAU"
             else:
-                limite = 40000
-                tipo_impreso = "PROGRESIVA"
+                limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz:
-            limite = 20000
-            tipo_impreso = "MECANICA"
+            limite = 20000; tipo_impreso = "MECANICA"
         else:
-            limite = 30000
-            tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', '', 'NAT'] else '-'
+            limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', '', 'NAT'] else '-'
             
         f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
         g_base = g_base if pd.notna(g_base) else 0
 
-        # Lógica de Mantenimientos por Pieza
+        # Mantenimientos por Pieza
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
@@ -234,9 +248,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= f_final)] if not df_sql.empty else pd.DataFrame()
                 g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
         else:
-            # === CAMBIO APLICADO AQUÍ ===
-            # Si no hay NINGUNA fecha de mantenimiento, forzamos contar desde el 1 de Enero de 2026.
-            # Además, IGNORAMOS la variable g_base para evitar que arrastre datos erróneos del Excel original.
+            # Matrices "Huérfanas": Sin Excel y sin form. Solo cuenta SQL limpio desde 1 de Enero 2026.
             fecha_corte_estricta = pd.to_datetime("2026-01-01")
             prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= fecha_corte_estricta)] if not df_sql.empty else pd.DataFrame()
             g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
@@ -244,7 +256,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
-        # Guardamos en formato seguro
         res_semaforo.append({
             'CLIENTE': cliente, 
             'PIEZA': str(row['RH']), 
@@ -296,14 +307,8 @@ class PDFResumen(FPDF):
 
 def build_pdf_main(df_resultados, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
-    
-    # --- HOJA 1: DETALLE ---
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    pdf.set_font("Arial", 'B', 9)
-    pdf.set_fill_color(31, 73, 125)
-    pdf.set_text_color(255, 255, 255)
+    pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(56, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
@@ -319,9 +324,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     for _, row in df_resultados.iterrows():
         bg = (255, 180, 180) if row['COLOR'] == "ROJO" else (255, 240, 180) if row['COLOR'] == "AMARILLO" else (198, 239, 206)
         txt = (180, 0, 0) if row['COLOR'] == "ROJO" else (150, 100, 0) if row['COLOR'] == "AMARILLO" else (0, 100, 0)
-        
-        tipo_str = str(row['TIPO']) 
-        if not tipo_str or tipo_str.upper() in ['NAN', 'NONE', '']: tipo_str = '-'
+        tipo_str = str(row['TIPO']) if str(row['TIPO']).upper() not in ['NAN', 'NONE', ''] else '-'
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
