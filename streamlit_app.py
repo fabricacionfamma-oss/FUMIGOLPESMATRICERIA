@@ -21,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ MOTOR INFALIBLE DE LECTURA ACTIVADO: Buscando tipos de matriz en toda la fila.")
+st.success("✅ MOTOR INFALIBLE DE LECTURA ACTIVADO: Escudo Anti-Colisión de Operaciones en línea.")
 st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -33,36 +33,35 @@ URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZ
 URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
 # ==========================================
-# 3. FUNCIONES DE LIMPIEZA Y COINCIDENCIA
+# 3. FUNCIONES DE LIMPIEZA Y COINCIDENCIA ESTRICTA
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper()
 
-def get_best_match(texto, lista_candidatos, umbral=0.8):
+def get_best_match(texto, lista_candidatos, umbral=0.85):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     
     # 1. Prioridad absoluta: Coincidencia exacta
     if val in lista_candidatos: return val
     
+    # Extractor estricto de Operación (ej. OP10, -20)
+    def extract_op(s):
+        m = re.search(r'(?:OP|-|_)0*(\d{2,3})$', s)
+        return m.group(1) if m else "BASE"
+
+    op_val = extract_op(val)
     mejor_coincidencia = val
     mejor_puntaje = 0.0
-    
-    # Extractor de Operación (ej. OP10, -20, OP-30) para evitar mezclar fases
-    def get_op_suffix(s):
-        m = re.search(r'(?:OP|OP-|-)0*(\d{2,3})$', s.strip())
-        return m.group(1) if m else None
-
-    op_val = get_op_suffix(val)
 
     for candidato in lista_candidatos:
         cand_str = clean_str(candidato)
         if not cand_str: continue
         
-        # Anti-colisión de Operaciones: Rechaza la similitud si difieren en la OP
-        op_cand = get_op_suffix(cand_str)
-        if op_val and op_cand and op_val != op_cand:
+        # REGLA DE ORO ANTI-COLISIÓN: 
+        # Impide que OP10, OP20, OP30 o piezas BASE se mezclen y sumen golpes de más.
+        if op_val != extract_op(cand_str):
             continue 
             
         puntaje = SequenceMatcher(None, val, cand_str).ratio()
@@ -75,7 +74,7 @@ def get_best_match(texto, lista_candidatos, umbral=0.8):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO (MÉTODO ROBUSTO) ---
+    # --- A. CARGAR CATÁLOGO ---
     try:
         df_cat_raw = pd.read_csv(URL_CATALOGO, header=None, dtype=str)
         header_idx = -1
@@ -163,7 +162,11 @@ def load_all_sources():
         conn = st.connection("wii_bi", type="sql")
         q = "SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES FROM PROD_D_01 p JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Date >= '2023-01-01' GROUP BY pr.Code, CAST(p.Date as DATE)"
         df_sql = conn.query(q)
-        df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'])
+        
+        # Filtros de seguridad extrema para SQL
+        df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
+        df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
+        
         piezas_unicas_sql = df_sql['PIEZA'].unique()
         mapeo_piezas = {p: get_best_match(p, catalogo_piezas) for p in piezas_unicas_sql}
         df_sql['PIEZA_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
@@ -184,7 +187,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
         
-        # 1. Búsqueda de Cliente segura
         cliente = ""
         for c in df_cat.columns:
             if 'CLIENT' in c:
@@ -192,7 +194,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 break
         if not cliente or cliente in ['NAN', 'NONE']: cliente = '-'
         
-        # 2. Búsqueda de Tipo escaneando toda la fila entera
         tipo_matriz = ""
         for val in row.values:
             v_str = str(val).strip().upper()
@@ -204,7 +205,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
             col_t = next((c for c in df_cat.columns if 'TIPO' in c or 'MATRIZ' in c), None)
             if col_t: tipo_matriz = str(row[col_t]).strip().upper()
         
-        # LÍMITES DINÁMICOS
         if 'PROG' in tipo_matriz:
             if 'FAU' in tipo_matriz or 'FAURECIA' in cliente:
                 limite = 60000; tipo_impreso = "PROG. FAU"
@@ -219,7 +219,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
         g_base = g_base if pd.notna(g_base) else 0
 
-        # Mantenimientos por Pieza
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
@@ -248,7 +247,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= f_final)] if not df_sql.empty else pd.DataFrame()
                 g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
         else:
-            # Matrices "Huérfanas": Sin Excel y sin form. Solo cuenta SQL limpio desde 1 de Enero 2026.
+            # === CORTE LIMPIO 1 DE ENERO 2026 ===
             fecha_corte_estricta = pd.to_datetime("2026-01-01")
             prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= fecha_corte_estricta)] if not df_sql.empty else pd.DataFrame()
             g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
