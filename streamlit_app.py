@@ -21,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ MOTOR INFALIBLE DE LECTURA ACTIVADO: Escudo Anti-Colisión de Operaciones en línea.")
+st.success("✅ MOTOR INFALIBLE ACTIVADO: Coincidencia Casi Exacta (98%) - Previene la mezcla de piezas LH y RH.")
 st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
@@ -37,32 +37,24 @@ URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5p
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
-    return str(val).strip().upper()
+    # Removemos espacios en blanco para que "FAU 17575" sea igual a "FAU17575"
+    return str(val).strip().upper().replace(" ", "")
 
-def get_best_match(texto, lista_candidatos, umbral=0.85):
+def get_best_match(texto, lista_candidatos, umbral=0.98):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     
     # 1. Prioridad absoluta: Coincidencia exacta
     if val in lista_candidatos: return val
     
-    # Extractor estricto de Operación (ej. OP10, -20)
-    def extract_op(s):
-        m = re.search(r'(?:OP|-|_)0*(\d{2,3})$', s)
-        return m.group(1) if m else "BASE"
-
-    op_val = extract_op(val)
+    # 2. Coincidencia Casi Exacta (98%)
+    # Un umbral del 98% evita que FAU17575 (RH) se sume con FAU17576 (LH)
     mejor_coincidencia = val
     mejor_puntaje = 0.0
 
     for candidato in lista_candidatos:
         cand_str = clean_str(candidato)
         if not cand_str: continue
-        
-        # REGLA DE ORO ANTI-COLISIÓN: 
-        # Impide que OP10, OP20, OP30 o piezas BASE se mezclen y sumen golpes de más.
-        if op_val != extract_op(cand_str):
-            continue 
             
         puntaje = SequenceMatcher(None, val, cand_str).ratio()
         if puntaje > mejor_puntaje:
@@ -70,6 +62,7 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
             mejor_coincidencia = cand_str
             
     if mejor_puntaje >= umbral: return mejor_coincidencia
+    # Si la pieza de SQL no coincide casi exactamente con el catálogo, no se asigna a nadie
     return val
 
 @st.cache_data(ttl=60)
@@ -160,7 +153,13 @@ def load_all_sources():
     # --- C. SQL (PRODUCCIÓN) ---
     try:
         conn = st.connection("wii_bi", type="sql")
-        q = "SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES FROM PROD_D_01 p JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Date >= '2023-01-01' GROUP BY pr.Code, CAST(p.Date as DATE)"
+        q = """
+        SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES 
+        FROM PROD_D_01 p 
+        JOIN PRODUCT pr ON p.ProductId = pr.ProductId 
+        WHERE p.Date >= '2023-01-01' 
+        GROUP BY pr.Code, CAST(p.Date as DATE)
+        """
         df_sql = conn.query(q)
         
         # Filtros de seguridad extrema para SQL
