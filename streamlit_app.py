@@ -234,8 +234,12 @@ def procesar_datos(df_cat, df_sql, df_forms):
                 prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= f_final)] if not df_sql.empty else pd.DataFrame()
                 g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
         else:
-            prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= inicio_anio)] if not df_sql.empty else pd.DataFrame()
-            g_total = int(g_base) + (int(prod['GOLPES'].sum()) if not prod.empty else 0)
+            # === CAMBIO APLICADO AQUÍ ===
+            # Si no hay NINGUNA fecha de mantenimiento, forzamos contar desde el 1 de Enero de 2026.
+            # Además, IGNORAMOS la variable g_base para evitar que arrastre datos erróneos del Excel original.
+            fecha_corte_estricta = pd.to_datetime("2026-01-01")
+            prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= fecha_corte_estricta)] if not df_sql.empty else pd.DataFrame()
+            g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
 
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
