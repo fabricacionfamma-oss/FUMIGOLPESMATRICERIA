@@ -5,3 +5,4 @@ fpdf
 kaleido
 SQLAlchemy
 pymssql
+xlsxwriter
