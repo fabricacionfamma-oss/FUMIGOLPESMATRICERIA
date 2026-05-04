@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import tempfile
 import os
 import re
+import io
 from difflib import SequenceMatcher
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -232,7 +233,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
     return pd.DataFrame(res_semaforo), pd.DataFrame(res_abiertos)
 
 # ==========================================
-# 5. GENERACIÓN DEL PDF (FPDF Y PLOTLY INTACTOS)
+# 5. GENERACIÓN DEL PDF Y EXCEL
 # ==========================================
 class PDFGolpes(FPDF):
     def header(self):
@@ -362,6 +363,14 @@ def build_pdf_resumen(df_resultados):
     os.remove(buf.name)
     return b
 
+def build_excel_main(df_resultados, df_abiertos):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_resultados.to_excel(writer, index=False, sheet_name='Estado de Matrices')
+        if not df_abiertos.empty:
+            df_abiertos.to_excel(writer, index=False, sheet_name='Abiertos')
+    return output.getvalue()
+
 # ==========================================
 # 6. INTERFAZ PRINCIPAL
 # ==========================================
@@ -372,7 +381,7 @@ with st.spinner("Conectando y procesando..."):
     df_cat, df_sql, df_forms = load_all_sources()
 
 if not df_cat.empty:
-    if st.button("⚙️ Procesar Datos de Matrices y Generar PDFs", use_container_width=True, type="primary"):
+    if st.button("⚙️ Procesar Datos de Matrices y Generar Informes", use_container_width=True, type="primary"):
         with st.spinner("Calculando estado de matrices y renderizando documentos..."):
             df_res, df_abiertos = procesar_datos(df_cat, df_sql, df_forms)
             st.session_state['df_res'] = df_res
@@ -392,13 +401,17 @@ if not df_cat.empty:
         # Mostrar tabla para previsualizar
         st.dataframe(df_res[['CLIENTE', 'PIEZA', 'TIPO', 'ULT_PREV', 'ULT_CORR', 'GOLPES', 'ESTADO']].style.apply(lambda x: ['background-color: lightcoral' if v == 'ROJO' else 'background-color: lightgoldenrodyellow' if v == 'AMARILLO' else 'background-color: lightgreen' for v in x], subset=['ESTADO']))
 
-        col_desc1, col_desc2 = st.columns(2)
+        col_desc1, col_desc2, col_desc3 = st.columns(3)
         fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
         
         with col_desc1:
             pdf_main_data = build_pdf_main(df_res, df_abiertos)
-            st.download_button(label="📥 Descargar Resumen de Golpes", data=pdf_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
+            st.download_button(label="📥 PDF: Resumen de Golpes", data=pdf_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
             
         with col_desc2:
+            excel_main_data = build_excel_main(df_res, df_abiertos)
+            st.download_button(label="📥 EXCEL: Resumen de Golpes", data=excel_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+            
+        with col_desc3:
             pdf_resumen_data = build_pdf_resumen(df_res)
-            st.download_button(label="📊 Descargar Gráficos y Estado General", data=pdf_resumen_data, file_name=f"Estado_Mantenimientos_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
+            st.download_button(label="📊 PDF: Gráficos y Estado General", data=pdf_resumen_data, file_name=f"Estado_Mantenimientos_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
