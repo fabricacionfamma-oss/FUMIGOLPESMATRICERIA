@@ -187,14 +187,17 @@ def procesar_datos(df_cat, df_sql, df_forms):
         # --- EXTRACCIÓN ROBUSTA DE LA COLUMNA MATRIZ ---
         pieza_mostrar = str(row['PIEZA_MOSTRAR'])
         
-        # Buscamos de forma difusa la columna que represente a la MATRIZ (ej: " MATRIZ ", "MATRIZ", etc)
-        # Nos aseguramos que no sea la de "TIPO MATRIZ"
-        col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
+        # Buscamos exactamente la columna "MATRIZ"
+        col_matriz = None
+        for c in df_cat.columns:
+            if c == 'MATRIZ' or (('MATRIZ' in c) and ('TIPO' not in c)):
+                col_matriz = c
+                break
         
+        # Si la encontramos y tiene un dato, REEMPLAZA al código de pieza
         if col_matriz:
             matriz_val = str(row[col_matriz]).strip()
-            # Si el cliente es Renault y hay algo válido en esa celda, lo pisamos:
-            if 'RENAULT' in cliente and matriz_val.upper() not in ['NAN', 'NONE', '-', '']:
+            if matriz_val.upper() not in ['NAN', 'NONE', '-', '']:
                 pieza_mostrar = matriz_val
         # -----------------------------------------------
 
@@ -232,7 +235,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         
         res_semaforo.append({
             'CLIENTE': cliente, 
-            'PIEZA': pieza_mostrar, 
+            'PIEZA': pieza_mostrar, # <-- Aquí manda el nombre de la MATRIZ
             'OP': '-', 
             'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
@@ -285,7 +288,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(56, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
+    pdf.cell(56, 8, "Nombre de Matriz", 1, 0, 'C', fill=True) # <-- Cambié el título aquí para más claridad
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
     pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
@@ -303,8 +306,8 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
         
-        # Amplié el límite visual en el PDF hasta 45 caracteres para que entren los nombres largos de Renault
-        pdf.cell(56, 7, str(row['PIEZA'])[:45], 1, 0, 'L')
+        # Ampliado a 48 caracteres para que no se corte el nombre de la Matriz (FAM...)
+        pdf.cell(56, 7, str(row['PIEZA'])[:48], 1, 0, 'L')
         
         pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
@@ -322,12 +325,16 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0); pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True); pdf.ln(3)
         pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
-        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
+        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Matriz", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
         pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True); pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
-            pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C'); pdf.cell(90, 7, str(r['PIEZA'])[:55], 1, 0, 'L'); pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
-            pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C'); pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
+            pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C')
+            # Ampliado a 65 caracteres para el reporte de abiertos
+            pdf.cell(90, 7, str(r['PIEZA'])[:65], 1, 0, 'L')
+            pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
+            pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C')
+            pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
 
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name)
@@ -347,7 +354,7 @@ def build_pdf_resumen(df_resultados):
         if tot > 0: resumen_data.append({'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"})
 
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255); mx = 43.5; pdf.set_x(mx)
-    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(25, 6, "TOTAL PIEZAS", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(25, 6, "TOTAL MATRICES", 1, 0, 'C', fill=True)
     pdf.cell(35, 6, "OK / CON PREV.", 1, 0, 'C', fill=True); pdf.cell(35, 6, "ALERTA / VENCIDO", 1, 0, 'C', fill=True)
     pdf.cell(40, 6, "% OK", 1, 0, 'C', fill=True); pdf.cell(40, 6, "% NO OK", 1, 1, 'C', fill=True)
     
