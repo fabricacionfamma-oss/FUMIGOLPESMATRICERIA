@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica Directa de Lectura de Columnas (Matriz y Tipo).")
+st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica exacta celda a celda aplicada.")
 st.divider()
 
 # ==========================================
@@ -80,20 +80,46 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. LECTURA DIRECTA DEL CATÁLOGO (SIN BUSQUEDAS RARAS) ---
+    # --- A. LECTURA DIRECTA DEL CATÁLOGO ---
     try:
-        # Leemos el Excel de manera estándar (asume que la fila 1 es el título, como en tu foto)
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        # Identificamos la columna del producto para la lógica interna
-        col_id = next((c for c in df_cat.columns if 'PRODUCTO 1' in c or 'PRODUCTO' in c or 'CODIGO' in c), None)
-        
+        # Identificar columnas con nombre exacto primero, o aproximado como backup
+        col_id = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO']), None)
+        if not col_id: col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c), None)
+
+        col_matriz = next((c for c in df_cat.columns if c == 'MATRIZ'), None)
+        if not col_matriz: col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
+
+        col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
+        if not col_tipo: col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
+
         if col_id:
             df_cat = df_cat.dropna(subset=[col_id])
             df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
+            
+            # --- EXTRACCIÓN INFALIBLE CELDA A CELDA ---
+            def get_nombre_mostrar(row):
+                if col_matriz and pd.notna(row.get(col_matriz)):
+                    val = str(row.get(col_matriz)).strip()
+                    if val and val.upper() not in ['NAN', 'NONE']:
+                        return val
+                return str(row.get(col_id)).strip()
+
+            def get_tipo_mostrar(row):
+                if col_tipo and pd.notna(row.get(col_tipo)):
+                    val = str(row.get(col_tipo)).strip().upper()
+                    if val and val not in ['NAN', 'NONE']:
+                        return val
+                return '-'
+
+            df_cat['PIEZA_MOSTRAR'] = df_cat.apply(get_nombre_mostrar, axis=1)
+            df_cat['TIPO_MOSTRAR'] = df_cat.apply(get_tipo_mostrar, axis=1)
+            # ------------------------------------------
+
         else:
-            st.error("❌ No se encontró la columna de 'PRODUCTO 1' en el Catálogo.")
+            st.error("❌ No se encontró la columna de PRODUCTO 1 en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             
         catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
@@ -181,10 +207,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
     res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
-    # Identificamos explícitamente las columnas MATRIZ y TIPO del Excel
-    col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
-    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
-
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
@@ -192,26 +214,14 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        # --- REGLA ESTRICTA PARA MOSTRAR LA MATRIZ ---
-        pieza_mostrar = p_key
-        if col_matriz and pd.notna(row[col_matriz]):
-            val_matriz = str(row[col_matriz]).strip()
-            if val_matriz not in ['NAN', 'NONE', '', 'nan']:
-                pieza_mostrar = val_matriz
-        # ---------------------------------------------
+        # Extraemos los valores pre-calculados en la carga
+        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key)).strip()
+        tipo_matriz = str(row.get('TIPO_MOSTRAR', '-')).strip().upper()
 
-        # --- REGLA ESTRICTA PARA MOSTRAR EL TIPO ---
-        tipo_raw = ""
-        if col_tipo and pd.notna(row[col_tipo]):
-            val_tipo = str(row[col_tipo]).strip().upper()
-            if val_tipo not in ['NAN', 'NONE', '', 'nan']:
-                tipo_raw = val_tipo
-
-        if 'PROG' in tipo_raw: limite = 40000; tipo_impreso = "PROGRESIVA"
-        elif 'MEC' in tipo_raw: limite = 20000; tipo_impreso = "MECANICA"
-        elif 'BAL' in tipo_raw: limite = 30000; tipo_impreso = "BALANCIN"
-        else: limite = 30000; tipo_impreso = tipo_raw if tipo_raw else '-'
-        # ---------------------------------------------
+        if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
+        elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
+        elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
+        else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz != '-' else '-'
 
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
