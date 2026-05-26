@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica Directa de Columnas Aplicada.")
+st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica Directa de Lectura de Columnas (Matriz y Tipo).")
 st.divider()
 
 # ==========================================
@@ -80,25 +80,20 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. LECTURA DIRECTA DEL CATÁLOGO ---
+    # --- A. LECTURA DIRECTA DEL CATÁLOGO (SIN BUSQUEDAS RARAS) ---
     try:
+        # Leemos el Excel de manera estándar (asume que la fila 1 es el título, como en tu foto)
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        # Validar que existan las columnas clave (según la captura)
-        if 'PRODUCTO 1' in df_cat.columns and 'MATRIZ' in df_cat.columns:
-            df_cat = df_cat.dropna(subset=['PRODUCTO 1'])
-            
-            # Llave interna para buscar en bases
-            df_cat['PIEZA_KEY'] = df_cat['PRODUCTO 1'].apply(clean_str)
-            
-            # Valor a imprimir (MATRIZ). Si la matriz está vacía, usamos el producto 1 como backup
-            df_cat['PIEZA_MOSTRAR'] = df_cat['MATRIZ'].fillna(df_cat['PRODUCTO 1'])
-            
-            # Guardamos el TIPO exacto
-            df_cat['TIPO_MOSTRAR'] = df_cat['TIPO'] if 'TIPO' in df_cat.columns else ""
+        # Identificamos la columna del producto para la lógica interna
+        col_id = next((c for c in df_cat.columns if 'PRODUCTO 1' in c or 'PRODUCTO' in c or 'CODIGO' in c), None)
+        
+        if col_id:
+            df_cat = df_cat.dropna(subset=[col_id])
+            df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
         else:
-            st.error("❌ No se encontraron las columnas 'PRODUCTO 1' o 'MATRIZ' en el Catálogo.")
+            st.error("❌ No se encontró la columna de 'PRODUCTO 1' en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             
         catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
@@ -186,6 +181,10 @@ def procesar_datos(df_cat, df_sql, df_forms):
     res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
+    # Identificamos explícitamente las columnas MATRIZ y TIPO del Excel
+    col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
+    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
+
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
@@ -193,14 +192,26 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        # Extraer Valores Directos
-        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', '-')).strip()
-        tipo_matriz = str(row.get('TIPO_MOSTRAR', '')).strip().upper()
+        # --- REGLA ESTRICTA PARA MOSTRAR LA MATRIZ ---
+        pieza_mostrar = p_key
+        if col_matriz and pd.notna(row[col_matriz]):
+            val_matriz = str(row[col_matriz]).strip()
+            if val_matriz not in ['NAN', 'NONE', '', 'nan']:
+                pieza_mostrar = val_matriz
+        # ---------------------------------------------
 
-        if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
-        elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
-        elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
-        else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
+        # --- REGLA ESTRICTA PARA MOSTRAR EL TIPO ---
+        tipo_raw = ""
+        if col_tipo and pd.notna(row[col_tipo]):
+            val_tipo = str(row[col_tipo]).strip().upper()
+            if val_tipo not in ['NAN', 'NONE', '', 'nan']:
+                tipo_raw = val_tipo
+
+        if 'PROG' in tipo_raw: limite = 40000; tipo_impreso = "PROGRESIVA"
+        elif 'MEC' in tipo_raw: limite = 20000; tipo_impreso = "MECANICA"
+        elif 'BAL' in tipo_raw: limite = 30000; tipo_impreso = "BALANCIN"
+        else: limite = 30000; tipo_impreso = tipo_raw if tipo_raw else '-'
+        # ---------------------------------------------
 
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
@@ -283,7 +294,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(56, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
+    pdf.cell(56, 8, "Pieza / Matriz", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
     pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
@@ -317,7 +328,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0); pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True); pdf.ln(3)
         pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
-        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
+        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza / Matriz", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
         pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True); pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
