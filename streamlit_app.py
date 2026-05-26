@@ -81,9 +81,30 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
+    # --- A. CARGAR CATÁLOGO NUEVO (CON DETECCIÓN INTELIGENTE DE CABECERAS) ---
     try:
-        df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
-        df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
+        df_raw = pd.read_csv(URL_CATALOGO)
+        
+        # Verificar si la fila 0 ya es la cabecera correcta
+        cols_str = " ".join([str(c).upper() for c in df_raw.columns])
+        if 'CLIENTE' in cols_str and ('PRODUCTO' in cols_str or 'CODIGO' in cols_str or 'MATRIZ' in cols_str):
+            df_cat = df_raw.copy().dropna(how='all')
+        else:
+            # Buscar en las primeras 10 filas dónde están los títulos
+            header_idx = -1
+            for i, row in df_raw.head(10).iterrows():
+                row_vals = " ".join([str(x).upper() for x in row.values])
+                if 'CLIENTE' in row_vals and ('PRODUCTO' in row_vals or 'CODIGO' in row_vals or 'MATRIZ' in row_vals):
+                    header_idx = i
+                    break
+            
+            if header_idx != -1:
+                df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx + 1).dropna(how='all')
+            else:
+                df_cat = df_raw.dropna(how='all')
+
+        # Limpiar nombres de columnas (quita espacios y tildes)
+        df_cat.columns = [str(c).strip().upper().replace('Í', 'I') for c in df_cat.columns]
         
         col_id = next((c for c in df_cat.columns if 'CODIGO' in c or 'PRODUCTO' in c), None)
         if col_id:
@@ -99,6 +120,7 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+    # --- B. CARGAR FORMS ---
     def fetch_forms(url, tipo_mant):
         try:
             df_raw = pd.read_csv(url)
@@ -146,6 +168,7 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
+    # --- C. SQL ---
     try:
         conn = st.connection("wii_bi", type="sql")
         q = """
@@ -177,6 +200,10 @@ def procesar_datos(df_cat, df_sql, df_forms):
     res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
+    # Identificar columnas con tolerancia
+    col_matriz = next((c for c in df_cat.columns if 'MATRI' in c and 'TIPO' not in c), None)
+    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
+
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
@@ -184,28 +211,30 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        # --- EXTRACCIÓN ROBUSTA DE LA COLUMNA MATRIZ ---
-        pieza_mostrar = str(row['PIEZA_MOSTRAR'])
-        
-        # Buscamos exactamente la columna "MATRIZ"
-        col_matriz = None
-        for c in df_cat.columns:
-            if c == 'MATRIZ' or (('MATRIZ' in c) and ('TIPO' not in c)):
-                col_matriz = c
-                break
-        
-        # Si la encontramos y tiene un dato, REEMPLAZA al código de pieza
-        if col_matriz:
-            matriz_val = str(row[col_matriz]).strip()
-            if matriz_val.upper() not in ['NAN', 'NONE', '-', '']:
-                pieza_mostrar = matriz_val
-        # -----------------------------------------------
+        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key))
 
-        tipo_matriz = str(row.get('TIPO MATRIZ', '')).upper()
+        # --- BUSQUEDA BLINDADA DEL FAM (MATRIZ) ---
+        if col_matriz:
+            val = str(row[col_matriz]).strip()
+            if val.upper() not in ['NAN', 'NONE', '-', '']:
+                pieza_mostrar = val
+
+        # FALLBACK EXTREMO PARA RENAULT: Si la columna MATRIZ falló, buscamos en TODA la fila la palabra FAM
+        if 'RENAULT' in cliente:
+            for col in df_cat.columns:
+                cell_val = str(row[col]).strip().upper()
+                if 'FAM' in cell_val and len(cell_val) > 4:
+                    pieza_mostrar = str(row[col]).strip()
+                    break
+        # ------------------------------------------
+
+        # --- BUSQUEDA BLINDADA DEL TIPO ---
+        tipo_matriz = str(row[col_tipo]).upper() if col_tipo else ""
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
         elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
         else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
+        # ----------------------------------
 
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
@@ -235,7 +264,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         
         res_semaforo.append({
             'CLIENTE': cliente, 
-            'PIEZA': pieza_mostrar, # <-- Aquí manda el nombre de la MATRIZ
+            'PIEZA': pieza_mostrar, 
             'OP': '-', 
             'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
@@ -288,7 +317,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(56, 8, "Nombre de Matriz", 1, 0, 'C', fill=True) # <-- Cambié el título aquí para más claridad
+    pdf.cell(56, 8, "Nombre de Matriz", 1, 0, 'C', fill=True) 
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
     pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
@@ -305,10 +334,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
-        
-        # Ampliado a 48 caracteres para que no se corte el nombre de la Matriz (FAM...)
         pdf.cell(56, 7, str(row['PIEZA'])[:48], 1, 0, 'L')
-        
         pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
@@ -330,7 +356,6 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
             pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C')
-            # Ampliado a 65 caracteres para el reporte de abiertos
             pdf.cell(90, 7, str(r['PIEZA'])[:65], 1, 0, 'L')
             pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
             pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C')
