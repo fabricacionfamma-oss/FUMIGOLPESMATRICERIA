@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica de Fechas: 100% Forms o Base 01/01/2026.")
+st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica Directa de Columnas Aplicada.")
 st.divider()
 
 # ==========================================
@@ -80,40 +80,25 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
+    # --- A. LECTURA DIRECTA DEL CATÁLOGO ---
     try:
-        df_raw = pd.read_csv(URL_CATALOGO)
+        df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
+        df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        # Búsqueda de la fila de cabecera correcta
-        header_idx = -1
-        for i, row in df_raw.head(15).iterrows():
-            row_vals = " ".join([str(x).upper() for x in row.values])
-            if 'CLIENTE' in row_vals and ('PRODUCTO' in row_vals or 'CODIGO' in row_vals or 'MATRIZ' in row_vals):
-                header_idx = i
-                break
-        
-        if header_idx != -1:
-            df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx + 1).dropna(how='all')
-        else:
-            df_cat = df_raw.copy().dropna(how='all')
-
-        df_cat.columns = [str(c).strip().upper().replace('Í', 'I') for c in df_cat.columns]
-        
-        col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c), None)
-        col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
-        
-        if col_id:
-            df_cat = df_cat.dropna(subset=[col_id])
-            df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
+        # Validar que existan las columnas clave (según la captura)
+        if 'PRODUCTO 1' in df_cat.columns and 'MATRIZ' in df_cat.columns:
+            df_cat = df_cat.dropna(subset=['PRODUCTO 1'])
             
-            # --- ACÁ ESTÁ LA SOLUCIÓN SIMPLE ---
-            # Si existe la columna MATRIZ, usamos su valor para mostrar. Si está vacía, usamos el código de Producto.
-            if col_matriz:
-                df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].replace(['', 'NAN', 'NONE', 'nan'], pd.NA).fillna(df_cat[col_id])
-            else:
-                df_cat['PIEZA_MOSTRAR'] = df_cat[col_id]
-            # -----------------------------------
+            # Llave interna para buscar en bases
+            df_cat['PIEZA_KEY'] = df_cat['PRODUCTO 1'].apply(clean_str)
+            
+            # Valor a imprimir (MATRIZ). Si la matriz está vacía, usamos el producto 1 como backup
+            df_cat['PIEZA_MOSTRAR'] = df_cat['MATRIZ'].fillna(df_cat['PRODUCTO 1'])
+            
+            # Guardamos el TIPO exacto
+            df_cat['TIPO_MOSTRAR'] = df_cat['TIPO'] if 'TIPO' in df_cat.columns else ""
         else:
-            st.error("❌ No se encontró la columna de Código/Producto en el Catálogo.")
+            st.error("❌ No se encontraron las columnas 'PRODUCTO 1' o 'MATRIZ' en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             
         catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
@@ -121,6 +106,7 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+    # --- B. LECTURA DE FORMULARIOS ---
     def fetch_forms(url, tipo_mant):
         try:
             df_raw = pd.read_csv(url)
@@ -168,6 +154,7 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
+    # --- C. SQL ---
     try:
         conn = st.connection("wii_bi", type="sql")
         q = """
@@ -206,12 +193,10 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        # Usamos directamente el valor que definimos en la carga inicial
-        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key)).strip()
+        # Extraer Valores Directos
+        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', '-')).strip()
+        tipo_matriz = str(row.get('TIPO_MOSTRAR', '')).strip().upper()
 
-        # Determinamos el TIPO (lee tanto si la columna se llama 'TIPO' como 'TIPO MATRIZ')
-        tipo_matriz = str(row.get('TIPO', row.get('TIPO MATRIZ', ''))).upper()
-        
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
         elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
@@ -298,7 +283,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(56, 8, "Pieza", 1, 0, 'C', fill=True) # <-- Vuelve a decir Pieza en el reporte
+    pdf.cell(56, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
     pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
