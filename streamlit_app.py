@@ -65,7 +65,6 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
         if not cand_str: 
             continue
             
-        # Lógica de subcadena: si uno está dentro del otro y tienen más de 7 caracteres
         if len(cand_str) > 7 and len(val) > 7:
             if cand_str in val or val in cand_str:
                 return cand_str
@@ -82,7 +81,6 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO NUEVO ---
     try:
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
@@ -101,7 +99,6 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # --- B. CARGAR FORMS ---
     def fetch_forms(url, tipo_mant):
         try:
             df_raw = pd.read_csv(url)
@@ -149,7 +146,6 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
-    # --- C. SQL (PRODUCCIÓN DESDE 2025 PARA CUBRIR MARGEN) ---
     try:
         conn = st.connection("wii_bi", type="sql")
         q = """
@@ -185,20 +181,23 @@ def procesar_datos(df_cat, df_sql, df_forms):
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
         
-        # Cliente (Si existe en el nuevo excel lo toma, sino '-')
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        # --- NUEVA LÓGICA: AGREGAR EL FAM PARA RENAULT ---
+        # --- EXTRACCIÓN ROBUSTA DE LA COLUMNA MATRIZ ---
         pieza_mostrar = str(row['PIEZA_MOSTRAR'])
-        matriz_val = str(row.get('MATRIZ', '')).strip()
         
-        if cliente == 'RENAULT' and matriz_val and matriz_val.upper() not in ['NAN', 'NONE']:
-            # Si tiene dato en la columna MATRIZ (ej: "FAM001 - RE656..."), lo pisamos para mostrarlo
-            pieza_mostrar = matriz_val
-        # -------------------------------------------------
+        # Buscamos de forma difusa la columna que represente a la MATRIZ (ej: " MATRIZ ", "MATRIZ", etc)
+        # Nos aseguramos que no sea la de "TIPO MATRIZ"
+        col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
+        
+        if col_matriz:
+            matriz_val = str(row[col_matriz]).strip()
+            # Si el cliente es Renault y hay algo válido en esa celda, lo pisamos:
+            if 'RENAULT' in cliente and matriz_val.upper() not in ['NAN', 'NONE', '-', '']:
+                pieza_mostrar = matriz_val
+        # -----------------------------------------------
 
-        # Limites según Tipo de Matriz (desde el nuevo Catálogo)
         tipo_matriz = str(row.get('TIPO MATRIZ', '')).upper()
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
@@ -222,7 +221,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
                     if pd.notna(max_p): f_prev = max_p
                     if pd.notna(max_c): f_corr = max_c
 
-        # Sumar Producción
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
 
@@ -234,7 +232,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         
         res_semaforo.append({
             'CLIENTE': cliente, 
-            'PIEZA': pieza_mostrar, # <-- Aquí se usa la variable actualizada
+            'PIEZA': pieza_mostrar, 
             'OP': '-', 
             'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
@@ -248,7 +246,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         if tiene_abierto:
             res_abiertos.append({
                 'CLIENTE': cliente, 
-                'PIEZA': pieza_mostrar, # <-- Aquí también se usa
+                'PIEZA': pieza_mostrar, 
                 'OP': '-', 
                 'TIPO_MANT_ABIERTO': tipo_abierto, 
                 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
@@ -304,7 +302,10 @@ def build_pdf_main(df_resultados, df_abiertos):
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
-        pdf.cell(56, 7, str(row['PIEZA'])[:38], 1, 0, 'L')
+        
+        # Amplié el límite visual en el PDF hasta 45 caracteres para que entren los nombres largos de Renault
+        pdf.cell(56, 7, str(row['PIEZA'])[:45], 1, 0, 'L')
+        
         pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
