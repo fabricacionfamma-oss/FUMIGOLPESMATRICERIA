@@ -50,7 +50,6 @@ def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper().replace(" ", "")
 
-# --- NUEVA VERSIÓN DE GET_BEST_MATCH ---
 def get_best_match(texto, lista_candidatos, umbral=0.85):
     if pd.isna(texto) or not str(texto).strip(): 
         return ""
@@ -80,7 +79,6 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
         return mejor_coincidencia
         
     return val
-# ---------------------------------------
 
 @st.cache_data(ttl=60)
 def load_all_sources():
@@ -191,6 +189,15 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
+        # --- NUEVA LÓGICA: AGREGAR EL FAM PARA RENAULT ---
+        pieza_mostrar = str(row['PIEZA_MOSTRAR'])
+        matriz_val = str(row.get('MATRIZ', '')).strip()
+        
+        if cliente == 'RENAULT' and matriz_val and matriz_val.upper() not in ['NAN', 'NONE']:
+            # Si tiene dato en la columna MATRIZ (ej: "FAM001 - RE656..."), lo pisamos para mostrarlo
+            pieza_mostrar = matriz_val
+        # -------------------------------------------------
+
         # Limites según Tipo de Matriz (desde el nuevo Catálogo)
         tipo_matriz = str(row.get('TIPO MATRIZ', '')).upper()
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
@@ -227,7 +234,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         
         res_semaforo.append({
             'CLIENTE': cliente, 
-            'PIEZA': str(row['PIEZA_MOSTRAR']), 
+            'PIEZA': pieza_mostrar, # <-- Aquí se usa la variable actualizada
             'OP': '-', 
             'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
@@ -241,7 +248,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         if tiene_abierto:
             res_abiertos.append({
                 'CLIENTE': cliente, 
-                'PIEZA': str(row['PIEZA_MOSTRAR']), 
+                'PIEZA': pieza_mostrar, # <-- Aquí también se usa
                 'OP': '-', 
                 'TIPO_MANT_ABIERTO': tipo_abierto, 
                 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
