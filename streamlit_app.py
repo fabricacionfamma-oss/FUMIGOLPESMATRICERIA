@@ -50,20 +50,37 @@ def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper().replace(" ", "")
 
-def get_best_match(texto, lista_candidatos, umbral=0.98):
-    if pd.isna(texto) or not str(texto).strip(): return ""
+# --- NUEVA VERSIÓN DE GET_BEST_MATCH ---
+def get_best_match(texto, lista_candidatos, umbral=0.85):
+    if pd.isna(texto) or not str(texto).strip(): 
+        return ""
+        
     val = clean_str(texto)
-    if val in lista_candidatos: return val
+    if val in lista_candidatos: 
+        return val
+        
     mejor_coincidencia, mejor_puntaje = val, 0.0
+    
     for candidato in lista_candidatos:
         cand_str = clean_str(candidato)
-        if not cand_str: continue
+        if not cand_str: 
+            continue
+            
+        # Lógica de subcadena: si uno está dentro del otro y tienen más de 7 caracteres
+        if len(cand_str) > 7 and len(val) > 7:
+            if cand_str in val or val in cand_str:
+                return cand_str
+                
         puntaje = SequenceMatcher(None, val, cand_str).ratio()
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
             mejor_coincidencia = cand_str
-    if mejor_puntaje >= umbral: return mejor_coincidencia
+            
+    if mejor_puntaje >= umbral: 
+        return mejor_coincidencia
+        
     return val
+# ---------------------------------------
 
 @st.cache_data(ttl=60)
 def load_all_sources():
