@@ -3,7 +3,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 import tempfile
 import os
-import re
 import io
 from difflib import SequenceMatcher
 import plotly.graph_objects as go
@@ -81,38 +80,40 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. CARGAR CATÁLOGO NUEVO (CON DETECCIÓN INTELIGENTE DE CABECERAS) ---
     try:
         df_raw = pd.read_csv(URL_CATALOGO)
         
-        # Verificar si la fila 0 ya es la cabecera correcta
-        cols_str = " ".join([str(c).upper() for c in df_raw.columns])
-        if 'CLIENTE' in cols_str and ('PRODUCTO' in cols_str or 'CODIGO' in cols_str or 'MATRIZ' in cols_str):
-            df_cat = df_raw.copy().dropna(how='all')
+        # Búsqueda de la fila de cabecera correcta
+        header_idx = -1
+        for i, row in df_raw.head(15).iterrows():
+            row_vals = " ".join([str(x).upper() for x in row.values])
+            if 'CLIENTE' in row_vals and ('PRODUCTO' in row_vals or 'CODIGO' in row_vals or 'MATRIZ' in row_vals):
+                header_idx = i
+                break
+        
+        if header_idx != -1:
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx + 1).dropna(how='all')
         else:
-            # Buscar en las primeras 10 filas dónde están los títulos
-            header_idx = -1
-            for i, row in df_raw.head(10).iterrows():
-                row_vals = " ".join([str(x).upper() for x in row.values])
-                if 'CLIENTE' in row_vals and ('PRODUCTO' in row_vals or 'CODIGO' in row_vals or 'MATRIZ' in row_vals):
-                    header_idx = i
-                    break
-            
-            if header_idx != -1:
-                df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx + 1).dropna(how='all')
-            else:
-                df_cat = df_raw.dropna(how='all')
+            df_cat = df_raw.copy().dropna(how='all')
 
-        # Limpiar nombres de columnas (quita espacios y tildes)
         df_cat.columns = [str(c).strip().upper().replace('Í', 'I') for c in df_cat.columns]
         
-        col_id = next((c for c in df_cat.columns if 'CODIGO' in c or 'PRODUCTO' in c), None)
+        col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c), None)
+        col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
+        
         if col_id:
             df_cat = df_cat.dropna(subset=[col_id])
             df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
-            df_cat['PIEZA_MOSTRAR'] = df_cat[col_id]
+            
+            # --- ACÁ ESTÁ LA SOLUCIÓN SIMPLE ---
+            # Si existe la columna MATRIZ, usamos su valor para mostrar. Si está vacía, usamos el código de Producto.
+            if col_matriz:
+                df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].replace(['', 'NAN', 'NONE', 'nan'], pd.NA).fillna(df_cat[col_id])
+            else:
+                df_cat['PIEZA_MOSTRAR'] = df_cat[col_id]
+            # -----------------------------------
         else:
-            st.error("❌ No se encontró la columna de Código en el Catálogo.")
+            st.error("❌ No se encontró la columna de Código/Producto en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             
         catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
@@ -120,7 +121,6 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # --- B. CARGAR FORMS ---
     def fetch_forms(url, tipo_mant):
         try:
             df_raw = pd.read_csv(url)
@@ -168,7 +168,6 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
-    # --- C. SQL ---
     try:
         conn = st.connection("wii_bi", type="sql")
         q = """
@@ -200,10 +199,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
     res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
-    # Identificar columnas con tolerancia
-    col_matriz = next((c for c in df_cat.columns if 'MATRI' in c and 'TIPO' not in c), None)
-    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
-
     for _, row in df_cat.iterrows():
         p_key = row.get('PIEZA_KEY')
         if pd.isna(p_key) or not str(p_key).strip(): continue
@@ -211,30 +206,16 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key))
+        # Usamos directamente el valor que definimos en la carga inicial
+        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key)).strip()
 
-        # --- BUSQUEDA BLINDADA DEL FAM (MATRIZ) ---
-        if col_matriz:
-            val = str(row[col_matriz]).strip()
-            if val.upper() not in ['NAN', 'NONE', '-', '']:
-                pieza_mostrar = val
-
-        # FALLBACK EXTREMO PARA RENAULT: Si la columna MATRIZ falló, buscamos en TODA la fila la palabra FAM
-        if 'RENAULT' in cliente:
-            for col in df_cat.columns:
-                cell_val = str(row[col]).strip().upper()
-                if 'FAM' in cell_val and len(cell_val) > 4:
-                    pieza_mostrar = str(row[col]).strip()
-                    break
-        # ------------------------------------------
-
-        # --- BUSQUEDA BLINDADA DEL TIPO ---
-        tipo_matriz = str(row[col_tipo]).upper() if col_tipo else ""
+        # Determinamos el TIPO (lee tanto si la columna se llama 'TIPO' como 'TIPO MATRIZ')
+        tipo_matriz = str(row.get('TIPO', row.get('TIPO MATRIZ', ''))).upper()
+        
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
         elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
         else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
-        # ----------------------------------
 
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
@@ -317,7 +298,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(56, 8, "Nombre de Matriz", 1, 0, 'C', fill=True) 
+    pdf.cell(56, 8, "Pieza", 1, 0, 'C', fill=True) # <-- Vuelve a decir Pieza en el reporte
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
     pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
@@ -334,7 +315,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
-        pdf.cell(56, 7, str(row['PIEZA'])[:48], 1, 0, 'L')
+        pdf.cell(56, 7, str(row['PIEZA'])[:46], 1, 0, 'L')
         pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
@@ -351,7 +332,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0); pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True); pdf.ln(3)
         pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
-        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Matriz", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
+        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
         pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True); pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
@@ -379,7 +360,7 @@ def build_pdf_resumen(df_resultados):
         if tot > 0: resumen_data.append({'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"})
 
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255); mx = 43.5; pdf.set_x(mx)
-    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(25, 6, "TOTAL MATRICES", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(25, 6, "TOTAL PIEZAS", 1, 0, 'C', fill=True)
     pdf.cell(35, 6, "OK / CON PREV.", 1, 0, 'C', fill=True); pdf.cell(35, 6, "ALERTA / VENCIDO", 1, 0, 'C', fill=True)
     pdf.cell(40, 6, "% OK", 1, 0, 'C', fill=True); pdf.cell(40, 6, "% NO OK", 1, 1, 'C', fill=True)
     
