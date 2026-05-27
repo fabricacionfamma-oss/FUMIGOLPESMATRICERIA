@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ NUEVO CATÁLOGO ACTIVADO | Lógica exacta celda a celda aplicada.")
+st.success("✅ CATÁLOGO ACTUALIZADO | Precisión al 95% y operaciones extraídas correctamente.")
 st.divider()
 
 # ==========================================
@@ -49,7 +49,8 @@ def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper().replace(" ", "")
 
-def get_best_match(texto, lista_candidatos, umbral=0.85):
+# UMBRAL ACTUALIZADO AL 95% (0.95)
+def get_best_match(texto, lista_candidatos, umbral=0.95):
     if pd.isna(texto) or not str(texto).strip(): 
         return ""
         
@@ -64,10 +65,6 @@ def get_best_match(texto, lista_candidatos, umbral=0.85):
         if not cand_str: 
             continue
             
-        if len(cand_str) > 7 and len(val) > 7:
-            if cand_str in val or val in cand_str:
-                return cand_str
-                
         puntaje = SequenceMatcher(None, val, cand_str).ratio()
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
@@ -85,9 +82,9 @@ def load_all_sources():
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        # Identificar columnas con nombre exacto primero, o aproximado como backup
-        col_id = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO']), None)
-        if not col_id: col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c), None)
+        # Identificar columnas con nombre exacto primero (AÑADIMOS 'PIEZA')
+        col_id = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO', 'PIEZA']), None)
+        if not col_id: col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c or 'PIEZA' in c), None)
 
         col_matriz = next((c for c in df_cat.columns if c == 'MATRIZ'), None)
         if not col_matriz: col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
@@ -95,9 +92,15 @@ def load_all_sources():
         col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
         if not col_tipo: col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
 
+        # IDENTIFICAR COLUMNA 'OP'
+        col_op = next((c for c in df_cat.columns if c == 'OP'), None)
+
         if col_id:
             df_cat = df_cat.dropna(subset=[col_id])
             df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
+            
+            # GUARDAR LA OP SI EXISTE
+            df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
             
             # --- EXTRACCIÓN INFALIBLE CELDA A CELDA ---
             def get_nombre_mostrar(row):
@@ -119,7 +122,7 @@ def load_all_sources():
             # ------------------------------------------
 
         else:
-            st.error("❌ No se encontró la columna de PRODUCTO 1 en el Catálogo.")
+            st.error("❌ No se encontró la columna de PIEZA/PRODUCTO en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
             
         catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
@@ -214,9 +217,12 @@ def procesar_datos(df_cat, df_sql, df_forms):
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        # Extraemos los valores pre-calculados en la carga
         pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key)).strip()
         tipo_matriz = str(row.get('TIPO_MOSTRAR', '-')).strip().upper()
+        
+        # OBTENEMOS EL VALOR DE LA OP AÑADIDO ANTES
+        op_mostrar = str(row.get('OP_MOSTRAR', '-')).strip()
+        if op_mostrar in ['NAN', 'NONE', '']: op_mostrar = '-'
 
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
@@ -249,10 +255,11 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
+        # APLICAMOS LA VARIABLE op_mostrar EN EL DICCIONARIO
         res_semaforo.append({
             'CLIENTE': cliente, 
             'PIEZA': pieza_mostrar, 
-            'OP': '-', 
+            'OP': op_mostrar, 
             'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
             'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
             'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
@@ -266,7 +273,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
             res_abiertos.append({
                 'CLIENTE': cliente, 
                 'PIEZA': pieza_mostrar, 
-                'OP': '-', 
+                'OP': op_mostrar, 
                 'TIPO_MANT_ABIERTO': tipo_abierto, 
                 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
             })
@@ -322,7 +329,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
         pdf.cell(56, 7, str(row['PIEZA'])[:46], 1, 0, 'L')
-        pdf.cell(10, 7, str(row['OP']), 1, 0, 'C')
+        pdf.cell(10, 7, str(row['OP'])[:8], 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_CORR']), 1, 0, 'C')
@@ -344,7 +351,7 @@ def build_pdf_main(df_resultados, df_abiertos):
         for _, r in df_abiertos.iterrows():
             pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C')
             pdf.cell(90, 7, str(r['PIEZA'])[:65], 1, 0, 'L')
-            pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
+            pdf.cell(15, 7, str(r['OP'])[:8], 1, 0, 'C')
             pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C')
             pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
 
@@ -443,7 +450,7 @@ if not df_cat.empty:
         st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
         
         # Mostrar tabla para previsualizar
-        st.dataframe(df_res[['CLIENTE', 'PIEZA', 'TIPO', 'ULT_PREV', 'ULT_CORR', 'GOLPES', 'ESTADO']].style.apply(lambda x: ['background-color: lightcoral' if v == 'ROJO' else 'background-color: lightgoldenrodyellow' if v == 'AMARILLO' else 'background-color: lightgreen' for v in x], subset=['ESTADO']))
+        st.dataframe(df_res[['CLIENTE', 'PIEZA', 'OP', 'TIPO', 'ULT_PREV', 'ULT_CORR', 'GOLPES', 'ESTADO']].style.apply(lambda x: ['background-color: lightcoral' if v == 'ROJO' else 'background-color: lightgoldenrodyellow' if v == 'AMARILLO' else 'background-color: lightgreen' for v in x], subset=['ESTADO']))
 
         col_desc1, col_desc2, col_desc3 = st.columns(3)
         fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
