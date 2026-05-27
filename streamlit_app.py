@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ CRUCE DE FECHAS MEJORADO | Se procesan todas las piezas, incluyendo FAM007 con sus fechas correctas.")
+st.success("✅ CRUCE 1-A-1 ACTIVADO | Formulario mapeado por 'MATRIZ' y SQL mapeado por 'PRODUCTO 1'.")
 st.divider()
 
 # ==========================================
@@ -55,18 +55,18 @@ def get_best_match(texto, lista_candidatos):
         
     val = clean_str(texto)
     
-    # 1. Coincidencia exacta
+    # 1. Coincidencia exacta (Ideal para listas desplegables)
     if val in lista_candidatos: 
         return val
         
-    # 2. Coincidencia por subcadena
+    # 2. Coincidencia por subcadena (Ej. Encuentra MP2 explícitamente)
     valid_candidates = [cand for cand in lista_candidatos if len(cand) > 6 and (cand in val or val in cand)]
     if valid_candidates:
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
         
-    # 3. Búsqueda difusa de alta precisión
-    matches = difflib.get_close_matches(val, lista_candidatos, n=1, cutoff=0.82)
+    # 3. Búsqueda difusa para tolerar errores menores de tipeo (corte estricto)
+    matches = difflib.get_close_matches(val, lista_candidatos, n=1, cutoff=0.85)
     if matches:
         return matches[0]
         
@@ -90,10 +90,11 @@ def load_all_sources():
 
         df_cat = df_cat.dropna(subset=[col_matriz])
         
+        # LLAVES INDEPENDIENTES PARA EL CRUCE 1 A 1
         df_cat['FORM_KEY'] = df_cat[col_matriz].apply(clean_str)
         df_cat['SQL_KEY'] = df_cat[col_prod].apply(clean_str) if col_prod else df_cat['FORM_KEY']
+        
         df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
-
         df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
         df_cat['TIPO_MOSTRAR'] = df_cat[col_tipo].fillna('-').astype(str) if col_tipo else '-'
 
@@ -133,14 +134,12 @@ def load_all_sources():
 
             registros = []
             for _, row in df_raw.iterrows():
-                # TRUCO DE FALLBACK DE FECHAS
+                # Extracción de fecha con fallback
                 fecha = pd.NaT
                 if col_f_manual and pd.notna(row.get(col_f_manual)):
                     fecha = pd.to_datetime(row.get(col_f_manual), dayfirst=True, errors='coerce')
-                    
                 if pd.isna(fecha) and col_f_auto and pd.notna(row.get(col_f_auto)):
                     fecha = pd.to_datetime(row.get(col_f_auto), dayfirst=True, errors='coerce')
-                    
                 if pd.isna(fecha): continue
                 
                 pieza_raw = ""
@@ -148,6 +147,7 @@ def load_all_sources():
                     val = clean_str(row.get(cp))
                     if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', '']:
                         pieza_raw = val; break 
+                
                 if not pieza_raw: continue
                 
                 terminado = 'NO'
@@ -156,8 +156,10 @@ def load_all_sources():
                     if val_t in ['SI', 'SÍ', 'VERDADERO']:
                         terminado = 'SI'; break
                 
+                # CRUCE EXCLUSIVO CON LA COLUMNA 'MATRIZ' DEL CATÁLOGO
                 f_key = get_best_match(pieza_raw, lista_forms_keys)
                 registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
+                    
             return pd.DataFrame(registros)
         except Exception: return pd.DataFrame()
 
@@ -182,6 +184,7 @@ def load_all_sources():
         df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
         df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
         
+        # CRUCE EXCLUSIVO CON LA COLUMNA 'PRODUCTO 1' DEL CATÁLOGO
         mapeo_piezas = {p: get_best_match(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
         df_sql['SQL_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
     except Exception as e: 
@@ -197,6 +200,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
     res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
+    # PROCESAMOS FILA POR FILA EL CATÁLOGO (Integrando Forms y SQL)
     for _, row in df_cat.iterrows():
         f_key = row.get('FORM_KEY')
         s_key = row.get('SQL_KEY')
@@ -220,6 +224,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
+            # Trae fechas asociadas a MATRIZ (ej: FAM014 ... MP2)
             match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
             if not match_f.empty:
                 match_f = match_f.sort_values('FECHA_DT')
@@ -237,6 +242,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
 
+        # Trae golpes asociados a PRODUCTO 1 (ej: RE638288522R-OP20)
         prod = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
         g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
 
