@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ CRUCE ESTRICTO 1-A-1 ACTIVADO | Discrimina perfectamente MP1 y MP2 usando listado y operaciones.")
+st.success("✅ BUG DE COLUMNAS DUPLICADAS SOLUCIONADO | El sistema ahora procesa fechas y mantenimientos pendientes correctamente.")
 st.divider()
 
 # ==========================================
@@ -82,7 +82,7 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
     
     # Si no hay candidatos por subcadena, busca con corrector ortográfico
     if not candidates:
-        matches = difflib.get_close_matches(p_clean, [clean_str(m) for m in cat_matrices], n=5, cutoff=0.82)
+        matches = difflib.get_close_matches(p_clean, [clean_str(m) for m in cat_matrices], n=5, cutoff=0.75)
         if matches:
             candidates = [m for m in cat_matrices if clean_str(m) in matches]
             
@@ -94,7 +94,7 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
         return candidates[0]
         
     # 3. Si hay varias opciones (MP1 vs MP2), utiliza la operación para discernir
-    best_score = -1
+    best_score = -999
     best_cand = candidates[0]
     
     for cand in candidates:
@@ -107,12 +107,13 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
             if op_clean == '20' and 'MP2' in cand_clean: score += 10
             if op_clean == '30' and 'MP3' in cand_clean: score += 10
             if op_clean == '40' and 'MP4' in cand_clean: score += 10
+            # Penaliza las bases u operaciones distintas
+            if op_clean == '20' and ('MP1' in cand_clean or 'OP30' in cand_clean): score -= 5
             
         # Si la operación es Multipuesto o vacía, premia a la MP1 y penaliza a la MP2
         elif op_clean in ['MULTIPUESTO', 'MP', '10', 'PROGRESIVA', 'PROG', '']:
             if 'MP1' in cand_clean or ('MP' not in cand_clean and 'OP' not in cand_clean): score += 5
-            if 'MP2' in cand_clean or 'OP20' in cand_clean: score -= 5
-            if 'MP3' in cand_clean or 'OP30' in cand_clean: score -= 5
+            if 'MP2' in cand_clean or 'OP20' in cand_clean or 'MP3' in cand_clean or 'OP30' in cand_clean: score -= 5
             
         if score > best_score:
             best_score = score
@@ -184,15 +185,20 @@ def load_all_sources():
             if header_idx != -1: df_raw = pd.read_csv(url, skiprows=header_idx + 1)
             df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
             
+            # --- SOLUCIÓN DEL CRASH: ELIMINAR COLUMNAS DUPLICADAS ---
+            df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
+            
             col_f_manual = 'FECHA' if 'FECHA' in df_raw.columns else None
             col_f_auto = next((c for c in df_raw.columns if 'MARCA TEMPORAL' in c), None)
             
             nombres_buscados = ['PIEZAS RENAULT', 'PIEZAS FIAT', 'PIEZAS PEUGEOT', 'PIEZAS FAURECIA', 'PIEZAS DENSO', 'MATRIZ']
-            cols_pieza = [c for c in df_raw.columns if any(n in c for n in nombres_buscados)]
+            
+            # EL FILTRO CLAVE: NO TOMAR "TIPO DE MATRIZ" NI PREGUNTAS LARGAS CON "["
+            cols_pieza = [c for c in df_raw.columns if any(n in c for n in nombres_buscados) and 'TIPO' not in c and '[' not in c]
             if not cols_pieza:
-                cols_pieza = [c for c in df_raw.columns if 'PIEZA' in c and 'TIPO' not in c and 'NUMERO' not in c]
+                cols_pieza = [c for c in df_raw.columns if 'PIEZA' in c and 'TIPO' not in c and 'NUMERO' not in c and '[' not in c]
                           
-            cols_term = [c for c in df_raw.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c]
+            cols_term = [c for c in df_raw.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO DEL MANTENIMIENTO' in c]
             
             if not col_f_auto and not col_f_manual: return pd.DataFrame()
 
@@ -219,11 +225,13 @@ def load_all_sources():
                 
                 if not pieza_raw: continue
                 
+                # REGLA ESTRICTA DE TERMINADO: Debe decir 'SI' o equivalente explícitamente.
                 terminado = 'NO'
                 for ct in cols_term:
                     val_t = clean_str(row.get(ct))
-                    if val_t in ['SI', 'SÍ', 'VERDADERO']:
-                        terminado = 'SI'; break
+                    if val_t in ['SI', 'SÍ', 'VERDADERO', 'FINALIZADO', 'OK']:
+                        terminado = 'SI'
+                        break
                 
                 # EJECUTA EL CRUCE MAESTRO (Evalúa pieza + operación en simultáneo)
                 f_key = get_best_match_hybrid(pieza_raw, op_raw, lista_forms_keys)
@@ -231,7 +239,9 @@ def load_all_sources():
                 registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
                     
             return pd.DataFrame(registros)
-        except Exception: return pd.DataFrame()
+        except Exception as e: 
+            st.error(f"Error procesando formulario {tipo_mant}: {e}")
+            return pd.DataFrame()
 
     df_prev = fetch_forms(URL_FORMS_PREV, "PREV")
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
