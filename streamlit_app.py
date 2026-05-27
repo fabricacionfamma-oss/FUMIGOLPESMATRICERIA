@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ BUG DE COLUMNAS DUPLICADAS SOLUCIONADO | El sistema ahora procesa fechas y mantenimientos pendientes correctamente.")
+st.success("✅ LISTADO DE ABIERTOS COMPLETO | Ahora se muestran ABSOLUTAMENTE TODOS los preventivos/correctivos sin cerrar al final del PDF.")
 st.divider()
 
 # ==========================================
@@ -72,15 +72,15 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
     
     if not p_clean: return ""
     
-    # 1. Match Exacto (Si eligen MP1 o MP2 explícitamente en el listado, se respeta al 100%)
+    # 1. Match Exacto 
     for m in cat_matrices:
         if clean_str(m) == p_clean:
             return m
             
-    # 2. Si es genérico, filtra los candidatos posibles en el catálogo
+    # 2. Match por Subcadena
     candidates = [m for m in cat_matrices if (p_clean in clean_str(m) or clean_str(m) in p_clean) and len(p_clean)>6]
     
-    # Si no hay candidatos por subcadena, busca con corrector ortográfico
+    # 3. Búsqueda Difusa
     if not candidates:
         matches = difflib.get_close_matches(p_clean, [clean_str(m) for m in cat_matrices], n=5, cutoff=0.75)
         if matches:
@@ -89,11 +89,10 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
     if not candidates:
         return pieza_raw 
         
-    # Si solo hay una opción (no es multipuesto), la devuelve
     if len(candidates) == 1:
         return candidates[0]
         
-    # 3. Si hay varias opciones (MP1 vs MP2), utiliza la operación para discernir
+    # 4. Discernir Multipuestos
     best_score = -999
     best_cand = candidates[0]
     
@@ -101,16 +100,13 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
         cand_clean = clean_str(cand)
         score = 0
         
-        # Si la operación es 20, 30, etc. premia a las MP2, MP3 u OP20
         if op_clean in ['20', '30', '40', '50', '60']:
             if f"OP{op_clean}" in cand_clean: score += 10
             if op_clean == '20' and 'MP2' in cand_clean: score += 10
             if op_clean == '30' and 'MP3' in cand_clean: score += 10
             if op_clean == '40' and 'MP4' in cand_clean: score += 10
-            # Penaliza las bases u operaciones distintas
             if op_clean == '20' and ('MP1' in cand_clean or 'OP30' in cand_clean): score -= 5
             
-        # Si la operación es Multipuesto o vacía, premia a la MP1 y penaliza a la MP2
         elif op_clean in ['MULTIPUESTO', 'MP', '10', 'PROGRESIVA', 'PROG', '']:
             if 'MP1' in cand_clean or ('MP' not in cand_clean and 'OP' not in cand_clean): score += 5
             if 'MP2' in cand_clean or 'OP20' in cand_clean or 'MP3' in cand_clean or 'OP30' in cand_clean: score -= 5
@@ -122,7 +118,6 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
     return best_cand
 
 def get_best_match_sql(texto, lista_candidatos):
-    # Función exclusiva para mapear los golpes de la máquina (Usa PRODUCTO 1)
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     for cand in lista_candidatos:
@@ -139,7 +134,6 @@ def get_best_match_sql(texto, lista_candidatos):
 
 @st.cache_data(ttl=60)
 def load_all_sources():
-    # --- A. LECTURA DIRECTA DEL CATÁLOGO ---
     try:
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
@@ -155,10 +149,8 @@ def load_all_sources():
 
         df_cat = df_cat.dropna(subset=[col_matriz])
         
-        # LLAVES INDEPENDIENTES PARA FORMS (MATRIZ) Y SQL (PRODUCTO 1)
         df_cat['FORM_KEY'] = df_cat[col_matriz].astype(str).str.strip()
         df_cat['SQL_KEY'] = df_cat[col_prod].astype(str).str.strip() if col_prod else df_cat['FORM_KEY']
-        
         df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
         df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
         df_cat['TIPO_MOSTRAR'] = df_cat[col_tipo].fillna('-').astype(str) if col_tipo else '-'
@@ -170,7 +162,6 @@ def load_all_sources():
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # --- B. LECTURA DE FORMULARIOS ---
     def fetch_forms(url, tipo_mant):
         try:
             df_raw = pd.read_csv(url)
@@ -185,15 +176,12 @@ def load_all_sources():
             if header_idx != -1: df_raw = pd.read_csv(url, skiprows=header_idx + 1)
             df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
             
-            # --- SOLUCIÓN DEL CRASH: ELIMINAR COLUMNAS DUPLICADAS ---
             df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
             
             col_f_manual = 'FECHA' if 'FECHA' in df_raw.columns else None
             col_f_auto = next((c for c in df_raw.columns if 'MARCA TEMPORAL' in c), None)
             
             nombres_buscados = ['PIEZAS RENAULT', 'PIEZAS FIAT', 'PIEZAS PEUGEOT', 'PIEZAS FAURECIA', 'PIEZAS DENSO', 'MATRIZ']
-            
-            # EL FILTRO CLAVE: NO TOMAR "TIPO DE MATRIZ" NI PREGUNTAS LARGAS CON "["
             cols_pieza = [c for c in df_raw.columns if any(n in c for n in nombres_buscados) and 'TIPO' not in c and '[' not in c]
             if not cols_pieza:
                 cols_pieza = [c for c in df_raw.columns if 'PIEZA' in c and 'TIPO' not in c and 'NUMERO' not in c and '[' not in c]
@@ -206,18 +194,17 @@ def load_all_sources():
             for _, row in df_raw.iterrows():
                 fecha = pd.NaT
                 if col_f_manual and pd.notna(row.get(col_f_manual)):
-                    fecha = pd.to_datetime(row.get(col_f_manual), dayfirst=True, errors='coerce')
+                    fecha = pd.to_datetime(row.get(col_f_manual), format='mixed', dayfirst=True, errors='coerce')
                 if pd.isna(fecha) and col_f_auto and pd.notna(row.get(col_f_auto)):
-                    fecha = pd.to_datetime(row.get(col_f_auto), dayfirst=True, errors='coerce')
+                    fecha = pd.to_datetime(row.get(col_f_auto), format='mixed', dayfirst=True, errors='coerce')
                 if pd.isna(fecha): continue
                 
                 pieza_raw, op_raw = "", ""
                 for cp in cols_pieza:
                     val = clean_str(row.get(cp))
                     if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', '']:
-                        pieza_raw = str(row.get(cp)) # Enviamos el nombre crudo
+                        pieza_raw = str(row.get(cp)) 
                         
-                        # Extraer operación
                         col_op_name = find_op_col_for_pieza(cp, df_raw.columns)
                         if col_op_name and pd.notna(row.get(col_op_name)):
                             op_raw = str(row.get(col_op_name))
@@ -225,7 +212,6 @@ def load_all_sources():
                 
                 if not pieza_raw: continue
                 
-                # REGLA ESTRICTA DE TERMINADO: Debe decir 'SI' o equivalente explícitamente.
                 terminado = 'NO'
                 for ct in cols_term:
                     val_t = clean_str(row.get(ct))
@@ -233,9 +219,7 @@ def load_all_sources():
                         terminado = 'SI'
                         break
                 
-                # EJECUTA EL CRUCE MAESTRO (Evalúa pieza + operación en simultáneo)
                 f_key = get_best_match_hybrid(pieza_raw, op_raw, lista_forms_keys)
-                
                 registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
                     
             return pd.DataFrame(registros)
@@ -247,7 +231,6 @@ def load_all_sources():
     df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
     df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
 
-    # --- C. SQL ---
     try:
         conn = st.connection("wii_bi", type="sql")
         q = """
@@ -264,7 +247,6 @@ def load_all_sources():
         df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
         df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
         
-        # Mapeo Exclusivo de SQL (Busca coincidencias con PRODUCTO 1)
         mapeo_piezas = {p: get_best_match_sql(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
         df_sql['SQL_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
     except Exception as e: 
@@ -300,17 +282,26 @@ def procesar_datos(df_cat, df_sql, df_forms):
         elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
         else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz != '-' else '-'
 
-        f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
+        f_prev, f_corr = pd.NaT, pd.NaT
 
         if not df_forms.empty:
-            # Cruzamos el Formulario con la llave exacta extraída
             match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
             if not match_f.empty:
                 match_f = match_f.sort_values('FECHA_DT')
-                last_record = match_f.iloc[-1]
-                if last_record['TERMINADO'] == 'NO':
-                    tiene_abierto = True; fecha_abierto = last_record['FECHA_DT']; tipo_abierto = last_record['TIPO_MANT']
+                
+                # --- NUEVA LÓGICA: AGREGA ABSOLUTAMENTE TODOS LOS ABIERTOS ---
+                abiertos = match_f[match_f['TERMINADO'] == 'NO']
+                for _, row_ab in abiertos.iterrows():
+                    res_abiertos.append({
+                        'CLIENTE': cliente, 
+                        'PIEZA': pieza_mostrar, 
+                        'OP': op_mostrar, 
+                        'TIPO_MANT_ABIERTO': row_ab['TIPO_MANT'], 
+                        'FECHA_APERTURA': row_ab['FECHA_DT'].strftime('%d/%m/%Y'),
+                        'SORT_FECHA': row_ab['FECHA_DT'] # Usado para ordenar
+                    })
 
+                # --- EXTRAE LAS FECHAS MÁS RECIENTES SOLO DE LOS CERRADOS ---
                 cerrados = match_f[match_f['TERMINADO'] == 'SI']
                 if not cerrados.empty:
                     max_p = cerrados[cerrados['TIPO_MANT'] == 'PREV']['FECHA_DT'].max()
@@ -321,7 +312,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
 
-        # Cruzamos SQL con la llave exacta de Producto
         prod = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
         g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
 
@@ -333,24 +323,21 @@ def procesar_datos(df_cat, df_sql, df_forms):
             'PIEZA': pieza_mostrar, 
             'OP': op_mostrar, 
             'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
-            'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
-            'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
+            'ULT_PREV': f_prev.strftime('%d/%m/%Y') if pd.notna(f_prev) else "-",
+            'ULT_CORR': f_corr.strftime('%d/%m/%Y') if pd.notna(f_corr) else "-",
             'GOLPES': g_total, 
             'LIMITE': limite, 
             'ESTADO': estado, 
             'COLOR': color
         })
 
-        if tiene_abierto:
-            res_abiertos.append({
-                'CLIENTE': cliente, 
-                'PIEZA': pieza_mostrar, 
-                'OP': op_mostrar, 
-                'TIPO_MANT_ABIERTO': tipo_abierto, 
-                'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
-            })
+    # Ordenamos la lista de abiertos para que se vea más limpia
+    df_abiertos_final = pd.DataFrame(res_abiertos)
+    if not df_abiertos_final.empty:
+        df_abiertos_final = df_abiertos_final.sort_values(by=['CLIENTE', 'SORT_FECHA'], ascending=[True, False])
+        df_abiertos_final = df_abiertos_final.drop(columns=['SORT_FECHA'])
 
-    return pd.DataFrame(res_semaforo), pd.DataFrame(res_abiertos)
+    return pd.DataFrame(res_semaforo), df_abiertos_final
 
 # ==========================================
 # 5. GENERACIÓN DEL PDF Y EXCEL
