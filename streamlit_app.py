@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ MATCHING INTELIGENTE ACTIVADO | Recupera todas las piezas y separa las OP correctamente.")
+st.success("✅ MATCHING INTELIGENTE ACTIVADO | Anchos de columnas en PDF ajustados.")
 st.divider()
 
 # ==========================================
@@ -71,7 +71,6 @@ def get_best_match(texto, lista_candidatos):
             
     if valid_candidates:
         # Ordenamos por longitud de mayor a menor. 
-        # Si val="FAA52055274-OP30", prefiere "FAA52055274-OP30" (16 chars) frente a "FAA52055274" (11 chars)
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
         
@@ -319,15 +318,17 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
+    # --- CAMBIOS EN LOS ANCHOS DE COLUMNA AQUÍ ---
+    # Se aumenta el de 'Pieza' a 76 y se reduce 'Estado' a 52
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(56, 8, "Pieza / Matriz", 1, 0, 'C', fill=True)
+    pdf.cell(76, 8, "Pieza / Matriz", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
     pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Corr.", 1, 0, 'C', fill=True)
     pdf.cell(26, 8, "Golpes Ac.", 1, 0, 'C', fill=True)
     pdf.cell(26, 8, "Limite M.", 1, 0, 'C', fill=True)
-    pdf.cell(72, 8, "Estado / Accion", 1, 1, 'C', fill=True)
+    pdf.cell(52, 8, "Estado / Accion", 1, 1, 'C', fill=True)
     
     pdf.set_font("Arial", '', 8)
     for _, row in df_resultados.iterrows():
@@ -337,7 +338,8 @@ def build_pdf_main(df_resultados, df_abiertos):
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
-        pdf.cell(56, 7, str(row['PIEZA'])[:46], 1, 0, 'L')
+        # También aumentamos los cortes de texto para que aproveche el nuevo espacio (de [:46] a [:65])
+        pdf.cell(76, 7, str(row['PIEZA'])[:65], 1, 0, 'L')
         pdf.cell(10, 7, str(row['OP'])[:8], 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
@@ -348,7 +350,9 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", '', 8)
         pdf.cell(26, 7, f"{row['LIMITE']:,}", 1, 0, 'C')
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
-        pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
+        
+        # Ajustamos a 52 el ancho de la celda de estado
+        pdf.cell(52, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
     if not df_abiertos.empty:
         pdf.add_page()
