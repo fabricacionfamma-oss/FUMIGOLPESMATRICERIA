@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import tempfile
 import os
 import io
-from difflib import SequenceMatcher
+import difflib
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from fpdf import FPDF
@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ CRUCE DE DOBLE VÍA ACTIVADO | Formularios se asocian por MATRIZ y SQL por PRODUCTO. Fechas exactas extraídas.")
+st.success("✅ CRUCE DE FECHAS MEJORADO | Se procesan todas las piezas, incluyendo FAM007 con sus fechas correctas.")
 st.divider()
 
 # ==========================================
@@ -65,16 +65,10 @@ def get_best_match(texto, lista_candidatos):
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
         
-    # 3. Búsqueda difusa para tolerar errores menores de tipeo
-    mejor_coincidencia, mejor_puntaje = "", 0.0
-    for cand in lista_candidatos:
-        puntaje = SequenceMatcher(None, val, cand).ratio()
-        if puntaje > mejor_puntaje:
-            mejor_puntaje = puntaje
-            mejor_coincidencia = cand
-            
-    if mejor_puntaje >= 0.82: 
-        return mejor_coincidencia
+    # 3. Búsqueda difusa de alta precisión
+    matches = difflib.get_close_matches(val, lista_candidatos, n=1, cutoff=0.82)
+    if matches:
+        return matches[0]
         
     return val
 
@@ -85,7 +79,6 @@ def load_all_sources():
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        # Identificar columnas maestras del Catálogo
         col_matriz = next((c for c in df_cat.columns if c == 'MATRIZ'), None)
         col_prod = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO']), None)
         col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
@@ -97,12 +90,10 @@ def load_all_sources():
 
         df_cat = df_cat.dropna(subset=[col_matriz])
         
-        # CREAMOS DOS LLAVES: Una para Forms (Matriz) y otra para SQL (Producto)
         df_cat['FORM_KEY'] = df_cat[col_matriz].apply(clean_str)
         df_cat['SQL_KEY'] = df_cat[col_prod].apply(clean_str) if col_prod else df_cat['FORM_KEY']
         df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
 
-        # Variables exclusivas para la visualización en el PDF
         df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
         df_cat['TIPO_MOSTRAR'] = df_cat[col_tipo].fillna('-').astype(str) if col_tipo else '-'
 
@@ -128,23 +119,28 @@ def load_all_sources():
             if header_idx != -1: df_raw = pd.read_csv(url, skiprows=header_idx + 1)
             df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
             
-            # 1. PRIORIZAR ESTRICTAMENTE LA COLUMNA "FECHA"
-            col_f = 'FECHA' if 'FECHA' in df_raw.columns else next((c for c in df_raw.columns if 'MARCA TEMPORAL' in c), None)
+            col_f_manual = 'FECHA' if 'FECHA' in df_raw.columns else None
+            col_f_auto = next((c for c in df_raw.columns if 'MARCA TEMPORAL' in c), None)
             
-            # 2. EXTRAER COLUMNAS ESPECÍFICAS DE CLIENTES PARA EVITAR BASURA
             nombres_buscados = ['PIEZAS RENAULT', 'PIEZAS FIAT', 'PIEZAS PEUGEOT', 'PIEZAS FAURECIA', 'PIEZAS DENSO', 'MATRIZ']
             cols_pieza = [c for c in df_raw.columns if any(n in c for n in nombres_buscados)]
-            if not cols_pieza: # Fallback por si le cambian el nombre en el form
+            if not cols_pieza:
                 cols_pieza = [c for c in df_raw.columns if 'PIEZA' in c and 'TIPO' not in c and 'NUMERO' not in c]
                           
             cols_term = [c for c in df_raw.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c]
             
-            if not col_f or not cols_pieza: return pd.DataFrame()
+            if not col_f_auto and not col_f_manual: return pd.DataFrame()
 
             registros = []
             for _, row in df_raw.iterrows():
-                # Toma la fecha de la columna estricta
-                fecha = pd.to_datetime(row.get(col_f), dayfirst=True, errors='coerce')
+                # TRUCO DE FALLBACK DE FECHAS
+                fecha = pd.NaT
+                if col_f_manual and pd.notna(row.get(col_f_manual)):
+                    fecha = pd.to_datetime(row.get(col_f_manual), dayfirst=True, errors='coerce')
+                    
+                if pd.isna(fecha) and col_f_auto and pd.notna(row.get(col_f_auto)):
+                    fecha = pd.to_datetime(row.get(col_f_auto), dayfirst=True, errors='coerce')
+                    
                 if pd.isna(fecha): continue
                 
                 pieza_raw = ""
@@ -160,7 +156,6 @@ def load_all_sources():
                     if val_t in ['SI', 'SÍ', 'VERDADERO']:
                         terminado = 'SI'; break
                 
-                # Causa el form match estrictamente con la llave de Form (MATRIZ del Catálogo)
                 f_key = get_best_match(pieza_raw, lista_forms_keys)
                 registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
             return pd.DataFrame(registros)
@@ -187,7 +182,6 @@ def load_all_sources():
         df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
         df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
         
-        # SQL se asocia estrictamente con la llave de SQL (PRODUCTO 1 del Catálogo)
         mapeo_piezas = {p: get_best_match(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
         df_sql['SQL_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
     except Exception as e: 
@@ -226,7 +220,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
-            # Filtramos forms usando su propia llave
             match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
             if not match_f.empty:
                 match_f = match_f.sort_values('FECHA_DT')
@@ -244,7 +237,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
 
-        # Filtramos SQL usando la llave de Producto 1
         prod = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
         g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
 
@@ -305,7 +297,6 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
-    # Anchos preservados de tu solicitud anterior (76 para pieza, 52 para Estado)
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(76, 8, "Pieza / Matriz", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
@@ -445,7 +436,6 @@ if not df_cat.empty:
         st.write("---")
         st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
         
-        # Mostrar tabla para previsualizar
         st.dataframe(df_res[['CLIENTE', 'PIEZA', 'OP', 'TIPO', 'ULT_PREV', 'ULT_CORR', 'GOLPES', 'ESTADO']].style.apply(lambda x: ['background-color: lightcoral' if v == 'ROJO' else 'background-color: lightgoldenrodyellow' if v == 'AMARILLO' else 'background-color: lightgreen' for v in x], subset=['ESTADO']))
 
         col_desc1, col_desc2, col_desc3 = st.columns(3)
