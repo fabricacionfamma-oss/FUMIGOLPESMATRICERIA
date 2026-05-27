@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ CATÁLOGO ACTUALIZADO | Precisión al 95% y operaciones extraídas correctamente.")
+st.success("✅ MATCHING INTELIGENTE ACTIVADO | Recupera todas las piezas y separa las OP correctamente.")
 st.divider()
 
 # ==========================================
@@ -49,28 +49,44 @@ def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper().replace(" ", "")
 
-# UMBRAL ACTUALIZADO AL 95% (0.95)
-def get_best_match(texto, lista_candidatos, umbral=0.95):
+def get_best_match(texto, lista_candidatos):
     if pd.isna(texto) or not str(texto).strip(): 
         return ""
         
     val = clean_str(texto)
+    
+    # 1. Coincidencia Exacta
     if val in lista_candidatos: 
         return val
         
-    mejor_coincidencia, mejor_puntaje = val, 0.0
-    
-    for candidato in lista_candidatos:
-        cand_str = clean_str(candidato)
-        if not cand_str: 
-            continue
+    # 2. Coincidencia por subcadena (Priorizando la más larga para aislar las OP)
+    valid_candidates = []
+    for cand in lista_candidatos:
+        cand_str = clean_str(cand)
+        if not cand_str: continue
+        
+        # Si uno está dentro del otro (ej. "PE9829769080" in "PE9829769080/PE9829769380")
+        if len(cand_str) > 6 and (cand_str in val or val in cand_str):
+            valid_candidates.append(cand_str)
             
+    if valid_candidates:
+        # Ordenamos por longitud de mayor a menor. 
+        # Si val="FAA52055274-OP30", prefiere "FAA52055274-OP30" (16 chars) frente a "FAA52055274" (11 chars)
+        valid_candidates.sort(key=len, reverse=True)
+        return valid_candidates[0]
+        
+    # 3. Búsqueda difusa (Fuzzy matching) como respaldo
+    mejor_coincidencia, mejor_puntaje = val, 0.0
+    for cand in lista_candidatos:
+        cand_str = clean_str(cand)
+        if not cand_str: continue
+        
         puntaje = SequenceMatcher(None, val, cand_str).ratio()
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
             mejor_coincidencia = cand_str
             
-    if mejor_puntaje >= umbral: 
+    if mejor_puntaje >= 0.82: # Umbral tolerante para errores mínimos de tipeo
         return mejor_coincidencia
         
     return val
@@ -82,7 +98,6 @@ def load_all_sources():
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        # Identificar columnas con nombre exacto primero (AÑADIMOS 'PIEZA')
         col_id = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO', 'PIEZA']), None)
         if not col_id: col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c or 'PIEZA' in c), None)
 
@@ -92,17 +107,14 @@ def load_all_sources():
         col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
         if not col_tipo: col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
 
-        # IDENTIFICAR COLUMNA 'OP'
         col_op = next((c for c in df_cat.columns if c == 'OP'), None)
 
         if col_id:
             df_cat = df_cat.dropna(subset=[col_id])
             df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
             
-            # GUARDAR LA OP SI EXISTE
             df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
             
-            # --- EXTRACCIÓN INFALIBLE CELDA A CELDA ---
             def get_nombre_mostrar(row):
                 if col_matriz and pd.notna(row.get(col_matriz)):
                     val = str(row.get(col_matriz)).strip()
@@ -119,7 +131,6 @@ def load_all_sources():
 
             df_cat['PIEZA_MOSTRAR'] = df_cat.apply(get_nombre_mostrar, axis=1)
             df_cat['TIPO_MOSTRAR'] = df_cat.apply(get_tipo_mostrar, axis=1)
-            # ------------------------------------------
 
         else:
             st.error("❌ No se encontró la columna de PIEZA/PRODUCTO en el Catálogo.")
@@ -220,7 +231,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key)).strip()
         tipo_matriz = str(row.get('TIPO_MOSTRAR', '-')).strip().upper()
         
-        # OBTENEMOS EL VALOR DE LA OP AÑADIDO ANTES
         op_mostrar = str(row.get('OP_MOSTRAR', '-')).strip()
         if op_mostrar in ['NAN', 'NONE', '']: op_mostrar = '-'
 
@@ -255,7 +265,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
         estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
-        # APLICAMOS LA VARIABLE op_mostrar EN EL DICCIONARIO
         res_semaforo.append({
             'CLIENTE': cliente, 
             'PIEZA': pieza_mostrar, 
