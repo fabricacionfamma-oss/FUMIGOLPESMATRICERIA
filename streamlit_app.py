@@ -23,7 +23,7 @@ MAQUINAS_ESTAMPADO = [
 # ==========================================
 # 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
-st.set_page_config(page_title="Control de Golpes de Matrices - Fumiscor", layout="wide", page_icon="⚙️")
+st.set_page_config(page_title="Control de Golpes - Fumiscor", layout="wide", page_icon="⚙️")
 
 st.markdown("""
 <style>
@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ MATCHING INTELIGENTE ACTIVADO | Anchos de columnas en PDF ajustados.")
+st.success("✅ CRUCE DE DOBLE VÍA ACTIVADO | Formularios se asocian por MATRIZ y SQL por PRODUCTO. Fechas exactas extraídas.")
 st.divider()
 
 # ==========================================
@@ -43,7 +43,7 @@ URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZ
 URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
 # ==========================================
-# 3. FUNCIONES DE LIMPIEZA
+# 3. FUNCIONES DE LIMPIEZA Y MATCHING
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
@@ -55,37 +55,25 @@ def get_best_match(texto, lista_candidatos):
         
     val = clean_str(texto)
     
-    # 1. Coincidencia Exacta
+    # 1. Coincidencia exacta
     if val in lista_candidatos: 
         return val
         
-    # 2. Coincidencia por subcadena (Priorizando la más larga para aislar las OP)
-    valid_candidates = []
-    for cand in lista_candidatos:
-        cand_str = clean_str(cand)
-        if not cand_str: continue
-        
-        # Si uno está dentro del otro (ej. "PE9829769080" in "PE9829769080/PE9829769380")
-        if len(cand_str) > 6 and (cand_str in val or val in cand_str):
-            valid_candidates.append(cand_str)
-            
+    # 2. Coincidencia por subcadena
+    valid_candidates = [cand for cand in lista_candidatos if len(cand) > 6 and (cand in val or val in cand)]
     if valid_candidates:
-        # Ordenamos por longitud de mayor a menor. 
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
         
-    # 3. Búsqueda difusa (Fuzzy matching) como respaldo
-    mejor_coincidencia, mejor_puntaje = val, 0.0
+    # 3. Búsqueda difusa para tolerar errores menores de tipeo
+    mejor_coincidencia, mejor_puntaje = "", 0.0
     for cand in lista_candidatos:
-        cand_str = clean_str(cand)
-        if not cand_str: continue
-        
-        puntaje = SequenceMatcher(None, val, cand_str).ratio()
+        puntaje = SequenceMatcher(None, val, cand).ratio()
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
-            mejor_coincidencia = cand_str
+            mejor_coincidencia = cand
             
-    if mejor_puntaje >= 0.82: # Umbral tolerante para errores mínimos de tipeo
+    if mejor_puntaje >= 0.82: 
         return mejor_coincidencia
         
     return val
@@ -97,45 +85,30 @@ def load_all_sources():
         df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
         df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
         
-        col_id = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO', 'PIEZA']), None)
-        if not col_id: col_id = next((c for c in df_cat.columns if 'PRODUCTO' in c or 'CODIGO' in c or 'PIEZA' in c), None)
-
+        # Identificar columnas maestras del Catálogo
         col_matriz = next((c for c in df_cat.columns if c == 'MATRIZ'), None)
-        if not col_matriz: col_matriz = next((c for c in df_cat.columns if 'MATRIZ' in c and 'TIPO' not in c), None)
-
+        col_prod = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO']), None)
         col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
-        if not col_tipo: col_tipo = next((c for c in df_cat.columns if 'TIPO' in c), None)
-
         col_op = next((c for c in df_cat.columns if c == 'OP'), None)
 
-        if col_id:
-            df_cat = df_cat.dropna(subset=[col_id])
-            df_cat['PIEZA_KEY'] = df_cat[col_id].apply(clean_str)
-            
-            df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
-            
-            def get_nombre_mostrar(row):
-                if col_matriz and pd.notna(row.get(col_matriz)):
-                    val = str(row.get(col_matriz)).strip()
-                    if val and val.upper() not in ['NAN', 'NONE']:
-                        return val
-                return str(row.get(col_id)).strip()
-
-            def get_tipo_mostrar(row):
-                if col_tipo and pd.notna(row.get(col_tipo)):
-                    val = str(row.get(col_tipo)).strip().upper()
-                    if val and val not in ['NAN', 'NONE']:
-                        return val
-                return '-'
-
-            df_cat['PIEZA_MOSTRAR'] = df_cat.apply(get_nombre_mostrar, axis=1)
-            df_cat['TIPO_MOSTRAR'] = df_cat.apply(get_tipo_mostrar, axis=1)
-
-        else:
-            st.error("❌ No se encontró la columna de PIEZA/PRODUCTO en el Catálogo.")
+        if not col_matriz:
+            st.error("❌ No se encontró la columna 'MATRIZ' en el Catálogo.")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+        df_cat = df_cat.dropna(subset=[col_matriz])
+        
+        # CREAMOS DOS LLAVES: Una para Forms (Matriz) y otra para SQL (Producto)
+        df_cat['FORM_KEY'] = df_cat[col_matriz].apply(clean_str)
+        df_cat['SQL_KEY'] = df_cat[col_prod].apply(clean_str) if col_prod else df_cat['FORM_KEY']
+        df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
+
+        # Variables exclusivas para la visualización en el PDF
+        df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
+        df_cat['TIPO_MOSTRAR'] = df_cat[col_tipo].fillna('-').astype(str) if col_tipo else '-'
+
+        lista_forms_keys = df_cat['FORM_KEY'].unique().tolist()
+        lista_sql_keys = df_cat['SQL_KEY'].unique().tolist()
             
-        catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
     except Exception as e:
         st.error(f"Error cargando Catálogo: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -155,14 +128,22 @@ def load_all_sources():
             if header_idx != -1: df_raw = pd.read_csv(url, skiprows=header_idx + 1)
             df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
             
-            col_f = next((c for c in df_raw.columns if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
-            cols_pieza = [c for c in df_raw.columns if any(k in c for k in ['PIEZA', 'RH', 'MATRIZ', 'CÓDIGO'])]
+            # 1. PRIORIZAR ESTRICTAMENTE LA COLUMNA "FECHA"
+            col_f = 'FECHA' if 'FECHA' in df_raw.columns else next((c for c in df_raw.columns if 'MARCA TEMPORAL' in c), None)
+            
+            # 2. EXTRAER COLUMNAS ESPECÍFICAS DE CLIENTES PARA EVITAR BASURA
+            nombres_buscados = ['PIEZAS RENAULT', 'PIEZAS FIAT', 'PIEZAS PEUGEOT', 'PIEZAS FAURECIA', 'PIEZAS DENSO', 'MATRIZ']
+            cols_pieza = [c for c in df_raw.columns if any(n in c for n in nombres_buscados)]
+            if not cols_pieza: # Fallback por si le cambian el nombre en el form
+                cols_pieza = [c for c in df_raw.columns if 'PIEZA' in c and 'TIPO' not in c and 'NUMERO' not in c]
+                          
             cols_term = [c for c in df_raw.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c]
             
             if not col_f or not cols_pieza: return pd.DataFrame()
 
             registros = []
             for _, row in df_raw.iterrows():
+                # Toma la fecha de la columna estricta
                 fecha = pd.to_datetime(row.get(col_f), dayfirst=True, errors='coerce')
                 if pd.isna(fecha): continue
                 
@@ -179,8 +160,9 @@ def load_all_sources():
                     if val_t in ['SI', 'SÍ', 'VERDADERO']:
                         terminado = 'SI'; break
                 
-                pieza_key = get_best_match(pieza_raw, catalogo_piezas)
-                registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'PIEZA_KEY': pieza_key})
+                # Causa el form match estrictamente con la llave de Form (MATRIZ del Catálogo)
+                f_key = get_best_match(pieza_raw, lista_forms_keys)
+                registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
             return pd.DataFrame(registros)
         except Exception: return pd.DataFrame()
 
@@ -205,8 +187,9 @@ def load_all_sources():
         df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
         df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
         
-        mapeo_piezas = {p: get_best_match(p, catalogo_piezas) for p in df_sql['PIEZA'].unique()}
-        df_sql['PIEZA_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
+        # SQL se asocia estrictamente con la llave de SQL (PRODUCTO 1 del Catálogo)
+        mapeo_piezas = {p: get_best_match(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
+        df_sql['SQL_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
     except Exception as e: 
         st.error(f"Error SQL: {e}"); df_sql = pd.DataFrame()
 
@@ -221,13 +204,15 @@ def procesar_datos(df_cat, df_sql, df_forms):
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
     for _, row in df_cat.iterrows():
-        p_key = row.get('PIEZA_KEY')
-        if pd.isna(p_key) or not str(p_key).strip(): continue
+        f_key = row.get('FORM_KEY')
+        s_key = row.get('SQL_KEY')
+        
+        if pd.isna(f_key) or not f_key: continue
         
         cliente = str(row.get('CLIENTE', '-')).strip().upper()
         if cliente in ['NAN', 'NONE', '']: cliente = '-'
 
-        pieza_mostrar = str(row.get('PIEZA_MOSTRAR', p_key)).strip()
+        pieza_mostrar = str(row.get('PIEZA_MOSTRAR')).strip()
         tipo_matriz = str(row.get('TIPO_MOSTRAR', '-')).strip().upper()
         
         op_mostrar = str(row.get('OP_MOSTRAR', '-')).strip()
@@ -241,7 +226,8 @@ def procesar_datos(df_cat, df_sql, df_forms):
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
-            match_f = df_forms[df_forms['PIEZA_KEY'] == p_key].copy()
+            # Filtramos forms usando su propia llave
+            match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
             if not match_f.empty:
                 match_f = match_f.sort_values('FECHA_DT')
                 last_record = match_f.iloc[-1]
@@ -258,7 +244,8 @@ def procesar_datos(df_cat, df_sql, df_forms):
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
 
-        prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
+        # Filtramos SQL usando la llave de Producto 1
+        prod = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
         g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
 
         color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
@@ -318,8 +305,7 @@ def build_pdf_main(df_resultados, df_abiertos):
     pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
-    # --- CAMBIOS EN LOS ANCHOS DE COLUMNA AQUÍ ---
-    # Se aumenta el de 'Pieza' a 76 y se reduce 'Estado' a 52
+    # Anchos preservados de tu solicitud anterior (76 para pieza, 52 para Estado)
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
     pdf.cell(76, 8, "Pieza / Matriz", 1, 0, 'C', fill=True)
     pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
@@ -338,7 +324,6 @@ def build_pdf_main(df_resultados, df_abiertos):
         
         pdf.set_text_color(0, 0, 0)
         pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
-        # También aumentamos los cortes de texto para que aproveche el nuevo espacio (de [:46] a [:65])
         pdf.cell(76, 7, str(row['PIEZA'])[:65], 1, 0, 'L')
         pdf.cell(10, 7, str(row['OP'])[:8], 1, 0, 'C')
         pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
@@ -350,8 +335,6 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", '', 8)
         pdf.cell(26, 7, f"{row['LIMITE']:,}", 1, 0, 'C')
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
-        
-        # Ajustamos a 52 el ancho de la celda de estado
         pdf.cell(52, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
     if not df_abiertos.empty:
