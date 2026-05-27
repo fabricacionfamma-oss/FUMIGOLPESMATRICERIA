@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ CRUCE 1-A-1 ACTIVADO | Formulario mapeado por 'MATRIZ' y SQL mapeado por 'PRODUCTO 1'.")
+st.success("✅ CRUCE ESTRICTO 1-A-1 ACTIVADO | Discrimina perfectamente MP1 y MP2 usando listado y operaciones.")
 st.divider()
 
 # ==========================================
@@ -43,34 +43,98 @@ URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZ
 URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
 # ==========================================
-# 3. FUNCIONES DE LIMPIEZA Y MATCHING
+# 3. FUNCIONES DE LIMPIEZA Y MATCHING AVANZADO
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
     return str(val).strip().upper().replace(" ", "")
 
-def get_best_match(texto, lista_candidatos):
-    if pd.isna(texto) or not str(texto).strip(): 
-        return ""
-        
-    val = clean_str(texto)
+def find_op_col_for_pieza(pieza_col_name, df_cols):
+    mapping = {
+        'PIEZAS RENAULT': 'OPERACION',
+        'PIEZAS FAURECIA': 'OPERACION 2',
+        'PIEZAS FIAT': 'OPERACION 3',
+        'PIEZAS DENSO': 'OPERACION 4',
+        'PIEZAS PEUGEOT': 'OPERACION 5',
+        'NUMERO DE PIEZA': 'OPERACION 6',
+        'MATRIZ': 'OPERACION'
+    }
+    target = next((v for k, v in mapping.items() if k in pieza_col_name.upper()), None)
+    if target:
+        for c in df_cols:
+            if clean_str(c) == clean_str(target): return c
+            if clean_str(c).replace('Ó','O') == clean_str(target): return c
+    return None
+
+def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
+    p_clean = clean_str(pieza_raw)
+    op_clean = clean_str(operacion_raw)
     
-    # 1. Coincidencia exacta (Ideal para listas desplegables)
-    if val in lista_candidatos: 
-        return val
+    if not p_clean: return ""
+    
+    # 1. Match Exacto (Si eligen MP1 o MP2 explícitamente en el listado, se respeta al 100%)
+    for m in cat_matrices:
+        if clean_str(m) == p_clean:
+            return m
+            
+    # 2. Si es genérico, filtra los candidatos posibles en el catálogo
+    candidates = [m for m in cat_matrices if (p_clean in clean_str(m) or clean_str(m) in p_clean) and len(p_clean)>6]
+    
+    # Si no hay candidatos por subcadena, busca con corrector ortográfico
+    if not candidates:
+        matches = difflib.get_close_matches(p_clean, [clean_str(m) for m in cat_matrices], n=5, cutoff=0.82)
+        if matches:
+            candidates = [m for m in cat_matrices if clean_str(m) in matches]
+            
+    if not candidates:
+        return pieza_raw 
         
-    # 2. Coincidencia por subcadena (Ej. Encuentra MP2 explícitamente)
-    valid_candidates = [cand for cand in lista_candidatos if len(cand) > 6 and (cand in val or val in cand)]
+    # Si solo hay una opción (no es multipuesto), la devuelve
+    if len(candidates) == 1:
+        return candidates[0]
+        
+    # 3. Si hay varias opciones (MP1 vs MP2), utiliza la operación para discernir
+    best_score = -1
+    best_cand = candidates[0]
+    
+    for cand in candidates:
+        cand_clean = clean_str(cand)
+        score = 0
+        
+        # Si la operación es 20, 30, etc. premia a las MP2, MP3 u OP20
+        if op_clean in ['20', '30', '40', '50', '60']:
+            if f"OP{op_clean}" in cand_clean: score += 10
+            if op_clean == '20' and 'MP2' in cand_clean: score += 10
+            if op_clean == '30' and 'MP3' in cand_clean: score += 10
+            if op_clean == '40' and 'MP4' in cand_clean: score += 10
+            
+        # Si la operación es Multipuesto o vacía, premia a la MP1 y penaliza a la MP2
+        elif op_clean in ['MULTIPUESTO', 'MP', '10', 'PROGRESIVA', 'PROG', '']:
+            if 'MP1' in cand_clean or ('MP' not in cand_clean and 'OP' not in cand_clean): score += 5
+            if 'MP2' in cand_clean or 'OP20' in cand_clean: score -= 5
+            if 'MP3' in cand_clean or 'OP30' in cand_clean: score -= 5
+            
+        if score > best_score:
+            best_score = score
+            best_cand = cand
+            
+    return best_cand
+
+def get_best_match_sql(texto, lista_candidatos):
+    # Función exclusiva para mapear los golpes de la máquina (Usa PRODUCTO 1)
+    if pd.isna(texto) or not str(texto).strip(): return ""
+    val = clean_str(texto)
+    for cand in lista_candidatos:
+        if clean_str(cand) == val: return cand
+    valid_candidates = [cand for cand in lista_candidatos if len(cand) > 6 and (clean_str(cand) in val or val in clean_str(cand))]
     if valid_candidates:
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
-        
-    # 3. Búsqueda difusa para tolerar errores menores de tipeo (corte estricto)
-    matches = difflib.get_close_matches(val, lista_candidatos, n=1, cutoff=0.85)
-    if matches:
-        return matches[0]
-        
-    return val
+    matches = difflib.get_close_matches(val, [clean_str(c) for c in lista_candidatos], n=1, cutoff=0.82)
+    if matches: 
+        for cand in lista_candidatos:
+            if clean_str(cand) == matches[0]: return cand
+    return texto
 
 @st.cache_data(ttl=60)
 def load_all_sources():
@@ -90,9 +154,9 @@ def load_all_sources():
 
         df_cat = df_cat.dropna(subset=[col_matriz])
         
-        # LLAVES INDEPENDIENTES PARA EL CRUCE 1 A 1
-        df_cat['FORM_KEY'] = df_cat[col_matriz].apply(clean_str)
-        df_cat['SQL_KEY'] = df_cat[col_prod].apply(clean_str) if col_prod else df_cat['FORM_KEY']
+        # LLAVES INDEPENDIENTES PARA FORMS (MATRIZ) Y SQL (PRODUCTO 1)
+        df_cat['FORM_KEY'] = df_cat[col_matriz].astype(str).str.strip()
+        df_cat['SQL_KEY'] = df_cat[col_prod].astype(str).str.strip() if col_prod else df_cat['FORM_KEY']
         
         df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
         df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
@@ -134,7 +198,6 @@ def load_all_sources():
 
             registros = []
             for _, row in df_raw.iterrows():
-                # Extracción de fecha con fallback
                 fecha = pd.NaT
                 if col_f_manual and pd.notna(row.get(col_f_manual)):
                     fecha = pd.to_datetime(row.get(col_f_manual), dayfirst=True, errors='coerce')
@@ -142,11 +205,17 @@ def load_all_sources():
                     fecha = pd.to_datetime(row.get(col_f_auto), dayfirst=True, errors='coerce')
                 if pd.isna(fecha): continue
                 
-                pieza_raw = ""
+                pieza_raw, op_raw = "", ""
                 for cp in cols_pieza:
                     val = clean_str(row.get(cp))
                     if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', '']:
-                        pieza_raw = val; break 
+                        pieza_raw = str(row.get(cp)) # Enviamos el nombre crudo
+                        
+                        # Extraer operación
+                        col_op_name = find_op_col_for_pieza(cp, df_raw.columns)
+                        if col_op_name and pd.notna(row.get(col_op_name)):
+                            op_raw = str(row.get(col_op_name))
+                        break 
                 
                 if not pieza_raw: continue
                 
@@ -156,8 +225,9 @@ def load_all_sources():
                     if val_t in ['SI', 'SÍ', 'VERDADERO']:
                         terminado = 'SI'; break
                 
-                # CRUCE EXCLUSIVO CON LA COLUMNA 'MATRIZ' DEL CATÁLOGO
-                f_key = get_best_match(pieza_raw, lista_forms_keys)
+                # EJECUTA EL CRUCE MAESTRO (Evalúa pieza + operación en simultáneo)
+                f_key = get_best_match_hybrid(pieza_raw, op_raw, lista_forms_keys)
+                
                 registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
                     
             return pd.DataFrame(registros)
@@ -184,8 +254,8 @@ def load_all_sources():
         df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce')
         df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
         
-        # CRUCE EXCLUSIVO CON LA COLUMNA 'PRODUCTO 1' DEL CATÁLOGO
-        mapeo_piezas = {p: get_best_match(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
+        # Mapeo Exclusivo de SQL (Busca coincidencias con PRODUCTO 1)
+        mapeo_piezas = {p: get_best_match_sql(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
         df_sql['SQL_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
     except Exception as e: 
         st.error(f"Error SQL: {e}"); df_sql = pd.DataFrame()
@@ -200,7 +270,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
     res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
-    # PROCESAMOS FILA POR FILA EL CATÁLOGO (Integrando Forms y SQL)
     for _, row in df_cat.iterrows():
         f_key = row.get('FORM_KEY')
         s_key = row.get('SQL_KEY')
@@ -224,7 +293,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         f_prev, f_corr, tiene_abierto, fecha_abierto, tipo_abierto = pd.NaT, pd.NaT, False, pd.NaT, ""
 
         if not df_forms.empty:
-            # Trae fechas asociadas a MATRIZ (ej: FAM014 ... MP2)
+            # Cruzamos el Formulario con la llave exacta extraída
             match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
             if not match_f.empty:
                 match_f = match_f.sort_values('FECHA_DT')
@@ -242,7 +311,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
 
-        # Trae golpes asociados a PRODUCTO 1 (ej: RE638288522R-OP20)
+        # Cruzamos SQL con la llave exacta de Producto
         prod = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
         g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
 
