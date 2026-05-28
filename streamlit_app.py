@@ -120,16 +120,33 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
 def get_best_match_sql(texto, lista_candidatos):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
+    
+    # 1. Match Exacto
     for cand in lista_candidatos:
         if clean_str(cand) == val: return cand
-    valid_candidates = [cand for cand in lista_candidatos if len(cand) > 6 and (clean_str(cand) in val or val in clean_str(cand))]
+        
+    # 2. Match por Subcadena (MODIFICADO)
+    valid_candidates = []
+    for cand in lista_candidatos:
+        c_clean = clean_str(cand)
+        if len(cand) > 6 and (c_clean in val or val in c_clean):
+            
+            # --- NUEVA REGLA: Prevenir que OP10 se asigne a piezas sin OP ---
+            if "OP" in val and "OP" not in c_clean:
+                continue
+                
+            valid_candidates.append(cand)
+
     if valid_candidates:
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
+        
+    # 3. Búsqueda Difusa
     matches = difflib.get_close_matches(val, [clean_str(c) for c in lista_candidatos], n=1, cutoff=0.82)
     if matches: 
         for cand in lista_candidatos:
             if clean_str(cand) == matches[0]: return cand
+            
     return texto
 
 @st.cache_data(ttl=60)
