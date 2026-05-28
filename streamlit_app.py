@@ -32,7 +32,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ LISTADO DE ABIERTOS ACTUALIZADO | Ahora se omiten los mantenimientos que fueron cerrados en fechas posteriores.")
 st.divider()
 
 # ==========================================
@@ -259,7 +258,6 @@ def load_all_sources():
 # ==========================================
 def procesar_datos(df_cat, df_sql, df_forms):
     res_semaforo = []
-    res_abiertos = []
     fecha_corte_default = pd.to_datetime("2026-01-01")
 
     for _, row in df_cat.iterrows():
@@ -287,41 +285,12 @@ def procesar_datos(df_cat, df_sql, df_forms):
         if not df_forms.empty:
             match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
             if not match_f.empty:
-                match_f = match_f.sort_values('FECHA_DT')
-                
-                # 1. Obtenemos las fechas de los últimos cierres primero
-                max_p, max_c = pd.NaT, pd.NaT
                 cerrados = match_f[match_f['TERMINADO'] == 'SI']
                 if not cerrados.empty:
                     mp = cerrados[cerrados['TIPO_MANT'] == 'PREV']['FECHA_DT'].max()
                     mc = cerrados[cerrados['TIPO_MANT'] == 'CORR']['FECHA_DT'].max()
-                    if pd.notna(mp):
-                        f_prev = mp
-                        max_p = mp
-                    if pd.notna(mc):
-                        f_corr = mc
-                        max_c = mc
-
-                # 2. Revisamos los abiertos omitiendo los que ya fueron cerrados posteriormente
-                abiertos = match_f[match_f['TERMINADO'] == 'NO']
-                for _, row_ab in abiertos.iterrows():
-                    tipo_m = row_ab['TIPO_MANT']
-                    fecha_ab = row_ab['FECHA_DT']
-                    
-                    # Si hubo un cierre posterior o el mismo día para este tipo, lo ignoramos
-                    if tipo_m == 'PREV' and pd.notna(max_p) and max_p >= fecha_ab:
-                        continue
-                    if tipo_m == 'CORR' and pd.notna(max_c) and max_c >= fecha_ab:
-                        continue
-
-                    res_abiertos.append({
-                        'CLIENTE': cliente, 
-                        'PIEZA': pieza_mostrar, 
-                        'OP': op_mostrar, 
-                        'TIPO_MANT_ABIERTO': tipo_m, 
-                        'FECHA_APERTURA': fecha_ab.strftime('%d/%m/%Y'),
-                        'SORT_FECHA': fecha_ab # Usado para ordenar
-                    })
+                    if pd.notna(mp): f_prev = mp
+                    if pd.notna(mc): f_corr = mc
 
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
@@ -345,12 +314,7 @@ def procesar_datos(df_cat, df_sql, df_forms):
             'COLOR': color
         })
 
-    df_abiertos_final = pd.DataFrame(res_abiertos)
-    if not df_abiertos_final.empty:
-        df_abiertos_final = df_abiertos_final.sort_values(by=['CLIENTE', 'SORT_FECHA'], ascending=[True, False])
-        df_abiertos_final = df_abiertos_final.drop(columns=['SORT_FECHA'])
-
-    return pd.DataFrame(res_semaforo), df_abiertos_final
+    return pd.DataFrame(res_semaforo)
 
 # ==========================================
 # 5. GENERACIÓN DEL PDF Y EXCEL
@@ -377,7 +341,7 @@ class PDFResumen(FPDF):
     def footer(self):
         self.set_y(-15); self.set_font("Arial", "I", 8); self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
-def build_pdf_main(df_resultados, df_abiertos):
+def build_pdf_main(df_resultados):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
@@ -412,20 +376,6 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.cell(26, 7, f"{row['LIMITE']:,}", 1, 0, 'C')
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(52, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
-
-    if not df_abiertos.empty:
-        pdf.add_page()
-        pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0); pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True); pdf.ln(3)
-        pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
-        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza / Matriz", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
-        pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True); pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
-        pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
-        for _, r in df_abiertos.iterrows():
-            pdf.cell(25, 7, str(r['CLIENTE'])[:15], 1, 0, 'C')
-            pdf.cell(90, 7, str(r['PIEZA'])[:65], 1, 0, 'L')
-            pdf.cell(15, 7, str(r['OP'])[:8], 1, 0, 'C')
-            pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C')
-            pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
 
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name)
@@ -486,12 +436,10 @@ def build_pdf_resumen(df_resultados):
     os.remove(buf.name)
     return b
 
-def build_excel_main(df_resultados, df_abiertos):
+def build_excel_main(df_resultados):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_resultados.to_excel(writer, index=False, sheet_name='Estado de Matrices')
-        if not df_abiertos.empty:
-            df_abiertos.to_excel(writer, index=False, sheet_name='Abiertos')
     return output.getvalue()
 
 # ==========================================
@@ -506,13 +454,11 @@ with st.spinner("Conectando y procesando..."):
 if not df_cat.empty:
     if st.button("⚙️ Procesar Datos de Matrices y Generar Informes", use_container_width=True, type="primary"):
         with st.spinner("Calculando estado de matrices y renderizando documentos..."):
-            df_res, df_abiertos = procesar_datos(df_cat, df_sql, df_forms)
+            df_res = procesar_datos(df_cat, df_sql, df_forms)
             st.session_state['df_res'] = df_res
-            st.session_state['df_abiertos'] = df_abiertos
 
     if 'df_res' in st.session_state and not st.session_state['df_res'].empty:
         df_res = st.session_state['df_res']
-        df_abiertos = st.session_state['df_abiertos']
         
         rojos = len(df_res[df_res['COLOR']=='ROJO'])
         amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
@@ -527,11 +473,11 @@ if not df_cat.empty:
         fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
         
         with col_desc1:
-            pdf_main_data = build_pdf_main(df_res, df_abiertos)
+            pdf_main_data = build_pdf_main(df_res)
             st.download_button(label="📥 PDF: Resumen de Golpes", data=pdf_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
             
         with col_desc2:
-            excel_main_data = build_excel_main(df_res, df_abiertos)
+            excel_main_data = build_excel_main(df_res)
             st.download_button(label="📥 EXCEL: Resumen de Golpes", data=excel_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             
         with col_desc3:
