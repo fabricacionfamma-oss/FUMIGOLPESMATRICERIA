@@ -32,7 +32,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
-st.success("✅ LISTADO DE ABIERTOS COMPLETO | Ahora se muestran ABSOLUTAMENTE TODOS los preventivos/correctivos sin cerrar al final del PDF.")
+st.success("✅ LISTADO DE ABIERTOS ACTUALIZADO | Ahora se omiten los mantenimientos que fueron cerrados en fechas posteriores.")
 st.divider()
 
 # ==========================================
@@ -72,27 +72,19 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
     
     if not p_clean: return ""
     
-    # 1. Match Exacto 
     for m in cat_matrices:
-        if clean_str(m) == p_clean:
-            return m
+        if clean_str(m) == p_clean: return m
             
-    # 2. Match por Subcadena
     candidates = [m for m in cat_matrices if (p_clean in clean_str(m) or clean_str(m) in p_clean) and len(p_clean)>6]
     
-    # 3. Búsqueda Difusa
     if not candidates:
         matches = difflib.get_close_matches(p_clean, [clean_str(m) for m in cat_matrices], n=5, cutoff=0.75)
         if matches:
             candidates = [m for m in cat_matrices if clean_str(m) in matches]
             
-    if not candidates:
-        return pieza_raw 
+    if not candidates: return pieza_raw 
+    if len(candidates) == 1: return candidates[0]
         
-    if len(candidates) == 1:
-        return candidates[0]
-        
-    # 4. Discernir Multipuestos
     best_score = -999
     best_cand = candidates[0]
     
@@ -121,27 +113,21 @@ def get_best_match_sql(texto, lista_candidatos):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
     
-    # 1. Match Exacto
     for cand in lista_candidatos:
         if clean_str(cand) == val: return cand
         
-    # 2. Match por Subcadena (MODIFICADO)
     valid_candidates = []
     for cand in lista_candidatos:
         c_clean = clean_str(cand)
         if len(cand) > 6 and (c_clean in val or val in c_clean):
-            
-            # --- NUEVA REGLA: Prevenir que OP10 se asigne a piezas sin OP ---
             if "OP" in val and "OP" not in c_clean:
                 continue
-                
             valid_candidates.append(cand)
 
     if valid_candidates:
         valid_candidates.sort(key=len, reverse=True)
         return valid_candidates[0]
         
-    # 3. Búsqueda Difusa
     matches = difflib.get_close_matches(val, [clean_str(c) for c in lista_candidatos], n=1, cutoff=0.82)
     if matches: 
         for cand in lista_candidatos:
@@ -165,7 +151,6 @@ def load_all_sources():
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         df_cat = df_cat.dropna(subset=[col_matriz])
-        
         df_cat['FORM_KEY'] = df_cat[col_matriz].astype(str).str.strip()
         df_cat['SQL_KEY'] = df_cat[col_prod].astype(str).str.strip() if col_prod else df_cat['FORM_KEY']
         df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
@@ -192,7 +177,6 @@ def load_all_sources():
             
             if header_idx != -1: df_raw = pd.read_csv(url, skiprows=header_idx + 1)
             df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
-            
             df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
             
             col_f_manual = 'FECHA' if 'FECHA' in df_raw.columns else None
@@ -221,7 +205,6 @@ def load_all_sources():
                     val = clean_str(row.get(cp))
                     if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', '']:
                         pieza_raw = str(row.get(cp)) 
-                        
                         col_op_name = find_op_col_for_pieza(cp, df_raw.columns)
                         if col_op_name and pd.notna(row.get(col_op_name)):
                             op_raw = str(row.get(col_op_name))
@@ -306,25 +289,39 @@ def procesar_datos(df_cat, df_sql, df_forms):
             if not match_f.empty:
                 match_f = match_f.sort_values('FECHA_DT')
                 
-                # --- NUEVA LÓGICA: AGREGA ABSOLUTAMENTE TODOS LOS ABIERTOS ---
+                # 1. Obtenemos las fechas de los últimos cierres primero
+                max_p, max_c = pd.NaT, pd.NaT
+                cerrados = match_f[match_f['TERMINADO'] == 'SI']
+                if not cerrados.empty:
+                    mp = cerrados[cerrados['TIPO_MANT'] == 'PREV']['FECHA_DT'].max()
+                    mc = cerrados[cerrados['TIPO_MANT'] == 'CORR']['FECHA_DT'].max()
+                    if pd.notna(mp):
+                        f_prev = mp
+                        max_p = mp
+                    if pd.notna(mc):
+                        f_corr = mc
+                        max_c = mc
+
+                # 2. Revisamos los abiertos omitiendo los que ya fueron cerrados posteriormente
                 abiertos = match_f[match_f['TERMINADO'] == 'NO']
                 for _, row_ab in abiertos.iterrows():
+                    tipo_m = row_ab['TIPO_MANT']
+                    fecha_ab = row_ab['FECHA_DT']
+                    
+                    # Si hubo un cierre posterior o el mismo día para este tipo, lo ignoramos
+                    if tipo_m == 'PREV' and pd.notna(max_p) and max_p >= fecha_ab:
+                        continue
+                    if tipo_m == 'CORR' and pd.notna(max_c) and max_c >= fecha_ab:
+                        continue
+
                     res_abiertos.append({
                         'CLIENTE': cliente, 
                         'PIEZA': pieza_mostrar, 
                         'OP': op_mostrar, 
-                        'TIPO_MANT_ABIERTO': row_ab['TIPO_MANT'], 
-                        'FECHA_APERTURA': row_ab['FECHA_DT'].strftime('%d/%m/%Y'),
-                        'SORT_FECHA': row_ab['FECHA_DT'] # Usado para ordenar
+                        'TIPO_MANT_ABIERTO': tipo_m, 
+                        'FECHA_APERTURA': fecha_ab.strftime('%d/%m/%Y'),
+                        'SORT_FECHA': fecha_ab # Usado para ordenar
                     })
-
-                # --- EXTRAE LAS FECHAS MÁS RECIENTES SOLO DE LOS CERRADOS ---
-                cerrados = match_f[match_f['TERMINADO'] == 'SI']
-                if not cerrados.empty:
-                    max_p = cerrados[cerrados['TIPO_MANT'] == 'PREV']['FECHA_DT'].max()
-                    max_c = cerrados[cerrados['TIPO_MANT'] == 'CORR']['FECHA_DT'].max()
-                    if pd.notna(max_p): f_prev = max_p
-                    if pd.notna(max_c): f_corr = max_c
 
         fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
         fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
@@ -348,7 +345,6 @@ def procesar_datos(df_cat, df_sql, df_forms):
             'COLOR': color
         })
 
-    # Ordenamos la lista de abiertos para que se vea más limpia
     df_abiertos_final = pd.DataFrame(res_abiertos)
     if not df_abiertos_final.empty:
         df_abiertos_final = df_abiertos_final.sort_values(by=['CLIENTE', 'SORT_FECHA'], ascending=[True, False])
