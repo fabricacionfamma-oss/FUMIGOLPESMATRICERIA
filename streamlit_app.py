@@ -275,9 +275,11 @@ def procesar_datos(df_cat, df_sql, df_forms):
         op_mostrar = str(row.get('OP_MOSTRAR', '-')).strip()
         if op_mostrar in ['NAN', 'NONE', '']: op_mostrar = '-'
 
+        # Nueva regla: si el tipo es AL o la operación es AL, el límite es 5000.
         if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
         elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
         elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
+        elif 'AL' in tipo_matriz or op_mostrar == 'AL': limite = 5000; tipo_impreso = "ALUMINIO"
         else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz != '-' else '-'
 
         f_prev, f_corr = pd.NaT, pd.NaT
@@ -345,7 +347,7 @@ class PDFHistorial(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Historial Específico de Mantenimientos", border=0, ln=True, align='C')
+        self.cell(0, 10, "Historial Especifico de Mantenimientos", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -355,7 +357,7 @@ class PDFHistorial(FPDF):
     def footer(self):
         self.set_y(-15)
         self.set_font("Arial", "I", 8)
-        self.cell(0, 10, f"Página {self.page_no()}", 0, 0, "C")
+        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
 def build_pdf_main(df_resultados):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
@@ -467,9 +469,8 @@ def build_pdf_historial(matriz_nombre, df_hist):
     pdf.set_font("Arial", 'B', 10)
     pdf.set_text_color(0, 0, 0)
     
-    # Decodificar el string para evitar problemas de codificación en FPDF
     matriz_str = matriz_nombre.encode('latin-1', 'replace').decode('latin-1')
-    pdf.cell(0, 10, f"Matriz / Operación: {matriz_str}", ln=True, align='L')
+    pdf.cell(0, 10, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
     pdf.ln(2)
 
     # Encabezado de la tabla
@@ -477,11 +478,10 @@ def build_pdf_historial(matriz_nombre, df_hist):
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
     
-    # Ajuste de anchos para centrar la tabla en A4 vertical (ancho total útil ~190mm)
     w_fecha = 40
     w_tipo = 65
     w_golpes = 65
-    offset = (210 - (w_fecha + w_tipo + w_golpes)) / 2 # Para centrar la tabla
+    offset = (210 - (w_fecha + w_tipo + w_golpes)) / 2 
     
     pdf.set_x(offset)
     pdf.cell(w_fecha, 8, "Fecha", 1, 0, 'C', fill=True)
@@ -495,7 +495,6 @@ def build_pdf_historial(matriz_nombre, df_hist):
         pdf.set_x(offset)
         pdf.cell(w_fecha, 7, str(row['Fecha de Mantenimiento']), 1, 0, 'C')
         
-        # Limpiar emojis para PDF (FPDF no los soporta nativamente en fuentes estandar)
         tipo_str = str(row['Tipo de Mantenimiento']).replace('🔧 ', '').replace('🛠️ ', '')
         pdf.cell(w_tipo, 7, tipo_str, 1, 0, 'C')
         
@@ -530,7 +529,7 @@ if not df_cat.empty:
         verdes = len(df_res[df_res['COLOR']=='VERDE'])
         
         st.write("---")
-        st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
+        st.write(f"**Resumen de la corrida:** 🔴 {rojos} Criticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
         
         st.dataframe(df_res[['CLIENTE', 'PIEZA', 'OP', 'TIPO', 'ULT_PREV', 'ULT_CORR', 'GOLPES', 'ESTADO']].style.apply(lambda x: ['background-color: lightcoral' if v == 'ROJO' else 'background-color: lightgoldenrodyellow' if v == 'AMARILLO' else 'background-color: lightgreen' for v in x], subset=['ESTADO']))
 
@@ -547,26 +546,24 @@ if not df_cat.empty:
             
         with col_desc3:
             pdf_resumen_data = build_pdf_resumen(df_res)
-            st.download_button(label="📊 PDF: Gráficos y Estado General", data=pdf_resumen_data, file_name=f"Estado_Mantenimientos_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
+            st.download_button(label="📊 PDF: Graficos y Estado General", data=pdf_resumen_data, file_name=f"Estado_Mantenimientos_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
 
 # ==========================================
 # 7. HISTORIAL ESPECÍFICO DE MATRIZ
 # ==========================================
 st.write("---")
-st.markdown('<div class="header-style">🔍 Historial Específico por Matriz</div>', unsafe_allow_html=True)
+st.markdown('<div class="header-style">🔍 Historial Especifico por Matriz</div>', unsafe_allow_html=True)
 
 if not df_cat.empty:
-    # Crear una etiqueta amigable combinando Cliente, Pieza y Operación
     df_cat['OPCION_SELECT'] = df_cat['CLIENTE'].fillna('-') + " | " + df_cat['PIEZA_MOSTRAR'] + " | OP: " + df_cat['OP_MOSTRAR']
     opciones_matriz = sorted(df_cat['OPCION_SELECT'].dropna().unique().tolist())
     
-    # Selectbox para que el usuario elija
     matriz_seleccionada = st.selectbox(
         "Seleccione una Matriz para revisar su historial de mantenimientos:", 
-        ["--- Seleccione una opción ---"] + opciones_matriz
+        ["--- Seleccione una opcion ---"] + opciones_matriz
     )
 
-    if matriz_seleccionada != "--- Seleccione una opción ---":
+    if matriz_seleccionada != "--- Seleccione una opcion ---":
         cat_info = df_cat[df_cat['OPCION_SELECT'] == matriz_seleccionada].iloc[0]
         f_key = cat_info['FORM_KEY']
         s_key = cat_info['SQL_KEY']
@@ -581,34 +578,41 @@ if not df_cat.empty:
         else:
             df_hist_mant = df_hist_mant.sort_values('FECHA_DT')
             historial_data = []
+            
+            es_primer_registro = True
             fecha_anterior = pd.to_datetime("2025-01-01") 
 
             for _, row in df_hist_mant.iterrows():
                 fecha_mant = row['FECHA_DT']
                 tipo_mant = row['TIPO_MANT']
 
-                if not df_sql.empty:
-                    df_golpes = df_sql[(df_sql['SQL_KEY'] == s_key) & 
-                                       (df_sql['FECHA'] > fecha_anterior) & 
-                                       (df_sql['FECHA'] <= fecha_mant)]
-                    golpes_acumulados = df_golpes['GOLPES'].sum()
-                else:
+                if es_primer_registro:
                     golpes_acumulados = 0
+                    texto_golpes = "0 (Registro Inicial)"
+                    es_primer_registro = False
+                else:
+                    if not df_sql.empty:
+                        df_golpes = df_sql[(df_sql['SQL_KEY'] == s_key) & 
+                                           (df_sql['FECHA'] > fecha_anterior) & 
+                                           (df_sql['FECHA'] <= fecha_mant)]
+                        golpes_acumulados = df_golpes['GOLPES'].sum()
+                    else:
+                        golpes_acumulados = 0
+                    texto_golpes = f"{int(golpes_acumulados):,}".replace(',', '.')
 
                 historial_data.append({
-                    "Exportar": True, # Agregamos una columna booleana por defecto en True
+                    "Exportar": True,
                     "Fecha de Mantenimiento": fecha_mant.strftime('%d/%m/%Y'),
                     "Tipo de Mantenimiento": "🔧 Preventivo" if tipo_mant == "PREV" else "🛠️ Correctivo",
-                    "Golpes al momento (Desde mant. anterior)": f"{int(golpes_acumulados):,}".replace(',', '.')
+                    "Golpes al momento (Desde mant. anterior)": texto_golpes
                 })
 
                 fecha_anterior = fecha_mant
 
             df_hist_mostrar = pd.DataFrame(historial_data)
             
-            st.write("📝 **Selecciona qué registros quieres incluir en el PDF a exportar:**")
+            st.write("📝 **Selecciona que registros quieres incluir en el PDF a exportar:**")
             
-            # Usamos st.data_editor para permitir al usuario seleccionar/deseleccionar filas
             df_editado = st.data_editor(
                 df_hist_mostrar,
                 column_config={
@@ -623,14 +627,11 @@ if not df_cat.empty:
                 use_container_width=True
             )
 
-            # Filtramos solo las filas que el usuario dejó marcadas
             df_a_exportar = df_editado[df_editado["Exportar"] == True].copy()
             
-            # Botón para generar y descargar PDF
             if not df_a_exportar.empty:
                 pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar)
                 
-                # Formateo del nombre de archivo seguro
                 nombre_seguro = "".join(c for c in s_key if c.isalnum() or c in ('-', '_')).strip()
                 fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
                 
