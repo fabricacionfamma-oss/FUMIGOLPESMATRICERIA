@@ -144,6 +144,7 @@ def load_all_sources():
         col_prod = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO']), None)
         col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
         col_op = next((c for c in df_cat.columns if c == 'OP'), None)
+        col_golpes = next((c for c in df_cat.columns if c == 'GOLPES'), None) # Nuevo mapeo de columna
 
         if not col_matriz:
             st.error("❌ No se encontró la columna 'MATRIZ' en el Catálogo.")
@@ -155,6 +156,9 @@ def load_all_sources():
         df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
         df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
         df_cat['TIPO_MOSTRAR'] = df_cat[col_tipo].fillna('-').astype(str) if col_tipo else '-'
+        
+        # Extraer el límite numérico del catálogo (por defecto 30000 si está vacío o no existe)
+        df_cat['LIMITE_GOLPES'] = pd.to_numeric(df_cat[col_golpes], errors='coerce').fillna(30000).astype(int) if col_golpes else 30000
 
         lista_forms_keys = df_cat['FORM_KEY'].unique().tolist()
         lista_sql_keys = df_cat['SQL_KEY'].unique().tolist()
@@ -275,12 +279,9 @@ def procesar_datos(df_cat, df_sql, df_forms):
         op_mostrar = str(row.get('OP_MOSTRAR', '-')).strip()
         if op_mostrar in ['NAN', 'NONE', '']: op_mostrar = '-'
 
-        # Nueva regla: si el tipo es AL o la operación es AL, el límite es 5000.
-        if 'PROG' in tipo_matriz: limite = 40000; tipo_impreso = "PROGRESIVA"
-        elif 'MEC' in tipo_matriz: limite = 20000; tipo_impreso = "MECANICA"
-        elif 'BAL' in tipo_matriz: limite = 30000; tipo_impreso = "BALANCIN"
-        elif 'AL' in tipo_matriz or op_mostrar == 'AL': limite = 5000; tipo_impreso = "ALUMINIO"
-        else: limite = 30000; tipo_impreso = tipo_matriz if tipo_matriz != '-' else '-'
+        # Nueva lógica: Obtiene el límite directamente de la base de datos de matrices
+        limite = int(row.get('LIMITE_GOLPES', 30000))
+        tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
 
         f_prev, f_corr = pd.NaT, pd.NaT
 
