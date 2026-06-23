@@ -483,3 +483,73 @@ if not df_cat.empty:
         with col_desc3:
             pdf_resumen_data = build_pdf_resumen(df_res)
             st.download_button(label="📊 PDF: Gráficos y Estado General", data=pdf_resumen_data, file_name=f"Estado_Mantenimientos_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
+
+# ==========================================
+# 7. HISTORIAL ESPECÍFICO DE MATRIZ
+# ==========================================
+st.write("---")
+st.markdown('<div class="header-style">🔍 Historial Específico por Matriz</div>', unsafe_allow_html=True)
+
+if not df_cat.empty:
+    # Crear una etiqueta amigable combinando Cliente, Pieza y Operación
+    df_cat['OPCION_SELECT'] = df_cat['CLIENTE'].fillna('-') + " | " + df_cat['PIEZA_MOSTRAR'] + " | OP: " + df_cat['OP_MOSTRAR']
+    opciones_matriz = sorted(df_cat['OPCION_SELECT'].dropna().unique().tolist())
+    
+    # Selectbox para que el usuario elija
+    matriz_seleccionada = st.selectbox(
+        "Seleccione una Matriz para revisar su historial de mantenimientos:", 
+        ["--- Seleccione una opción ---"] + opciones_matriz
+    )
+
+    if matriz_seleccionada != "--- Seleccione una opción ---":
+        # Extraer las llaves (keys) de la matriz seleccionada
+        cat_info = df_cat[df_cat['OPCION_SELECT'] == matriz_seleccionada].iloc[0]
+        f_key = cat_info['FORM_KEY']
+        s_key = cat_info['SQL_KEY']
+
+        # Filtrar el historial de mantenimientos completados
+        if not df_forms.empty:
+            df_hist_mant = df_forms[(df_forms['FORM_KEY'] == f_key) & (df_forms['TERMINADO'] == 'SI')].copy()
+        else:
+            df_hist_mant = pd.DataFrame()
+
+        if df_hist_mant.empty:
+            st.info("ℹ️ No hay registros de mantenimientos finalizados para esta matriz en los formularios.")
+        else:
+            # Ordenar cronológicamente para calcular la diferencia de golpes correctamente
+            df_hist_mant = df_hist_mant.sort_values('FECHA_DT')
+            historial_data = []
+            
+            # Fecha base inicial (según la fecha de tu consulta SQL)
+            fecha_anterior = pd.to_datetime("2025-01-01") 
+
+            for _, row in df_hist_mant.iterrows():
+                fecha_mant = row['FECHA_DT']
+                tipo_mant = row['TIPO_MANT']
+
+                # Calcular golpes acumulados entre el mantenimiento anterior y el actual
+                if not df_sql.empty:
+                    df_golpes = df_sql[(df_sql['SQL_KEY'] == s_key) & 
+                                       (df_sql['FECHA'] > fecha_anterior) & 
+                                       (df_sql['FECHA'] <= fecha_mant)]
+                    golpes_acumulados = df_golpes['GOLPES'].sum()
+                else:
+                    golpes_acumulados = 0
+
+                historial_data.append({
+                    "Fecha de Mantenimiento": fecha_mant.strftime('%d/%m/%Y'),
+                    "Tipo de Mantenimiento": "🔧 Preventivo" if tipo_mant == "PREV" else "🛠️ Correctivo",
+                    "Golpes al momento (Desde mant. anterior)": f"{int(golpes_acumulados):,}".replace(',', '.')
+                })
+
+                # Actualizar la fecha anterior para el próximo ciclo
+                fecha_anterior = fecha_mant
+
+            # Mostrar el resultado en una tabla limpia
+            df_hist_mostrar = pd.DataFrame(historial_data)
+            st.dataframe(df_hist_mostrar, use_container_width=True, hide_index=True)
+            
+            # (Opcional) Mostrar métrica rápida de estado actual
+            if not df_sql.empty:
+                golpes_actuales = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] > fecha_anterior)]['GOLPES'].sum()
+                st.caption(f"**Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}):** {int(golpes_actuales):,} golpes.")
