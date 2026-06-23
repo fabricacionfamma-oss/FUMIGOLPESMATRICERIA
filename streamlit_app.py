@@ -341,6 +341,22 @@ class PDFResumen(FPDF):
     def footer(self):
         self.set_y(-15); self.set_font("Arial", "I", 8); self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
+class PDFHistorial(FPDF):
+    def header(self):
+        self.set_font("Arial", 'B', 15)
+        self.set_text_color(31, 73, 125)
+        self.cell(0, 10, "Historial Específico de Mantenimientos", border=0, ln=True, align='C')
+        self.set_font("Arial", 'I', 9)
+        self.set_text_color(100, 100, 100)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
+        self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Página {self.page_no()}", 0, 0, "C")
+
 def build_pdf_main(df_resultados):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
@@ -442,6 +458,55 @@ def build_excel_main(df_resultados):
         df_resultados.to_excel(writer, index=False, sheet_name='Estado de Matrices')
     return output.getvalue()
 
+def build_pdf_historial(matriz_nombre, df_hist):
+    pdf = PDFHistorial(orientation='P', unit='mm', format='A4')
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Info de la matriz
+    pdf.set_font("Arial", 'B', 10)
+    pdf.set_text_color(0, 0, 0)
+    
+    # Decodificar el string para evitar problemas de codificación en FPDF
+    matriz_str = matriz_nombre.encode('latin-1', 'replace').decode('latin-1')
+    pdf.cell(0, 10, f"Matriz / Operación: {matriz_str}", ln=True, align='L')
+    pdf.ln(2)
+
+    # Encabezado de la tabla
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(31, 73, 125)
+    pdf.set_text_color(255, 255, 255)
+    
+    # Ajuste de anchos para centrar la tabla en A4 vertical (ancho total útil ~190mm)
+    w_fecha = 40
+    w_tipo = 65
+    w_golpes = 65
+    offset = (210 - (w_fecha + w_tipo + w_golpes)) / 2 # Para centrar la tabla
+    
+    pdf.set_x(offset)
+    pdf.cell(w_fecha, 8, "Fecha", 1, 0, 'C', fill=True)
+    pdf.cell(w_tipo, 8, "Tipo de Mantenimiento", 1, 0, 'C', fill=True)
+    pdf.cell(w_golpes, 8, "Golpes (Desde ant.)", 1, 1, 'C', fill=True)
+
+    # Cuerpo de la tabla
+    pdf.set_font("Arial", '', 9)
+    pdf.set_text_color(0, 0, 0)
+    for _, row in df_hist.iterrows():
+        pdf.set_x(offset)
+        pdf.cell(w_fecha, 7, str(row['Fecha de Mantenimiento']), 1, 0, 'C')
+        
+        # Limpiar emojis para PDF (FPDF no los soporta nativamente en fuentes estandar)
+        tipo_str = str(row['Tipo de Mantenimiento']).replace('🔧 ', '').replace('🛠️ ', '')
+        pdf.cell(w_tipo, 7, tipo_str, 1, 0, 'C')
+        
+        pdf.cell(w_golpes, 7, str(row['Golpes al momento (Desde mant. anterior)']), 1, 1, 'C')
+
+    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    pdf.output(buf.name)
+    b = open(buf.name, "rb").read()
+    os.remove(buf.name)
+    return b
+
 # ==========================================
 # 6. INTERFAZ PRINCIPAL
 # ==========================================
@@ -502,12 +567,10 @@ if not df_cat.empty:
     )
 
     if matriz_seleccionada != "--- Seleccione una opción ---":
-        # Extraer las llaves (keys) de la matriz seleccionada
         cat_info = df_cat[df_cat['OPCION_SELECT'] == matriz_seleccionada].iloc[0]
         f_key = cat_info['FORM_KEY']
         s_key = cat_info['SQL_KEY']
 
-        # Filtrar el historial de mantenimientos completados
         if not df_forms.empty:
             df_hist_mant = df_forms[(df_forms['FORM_KEY'] == f_key) & (df_forms['TERMINADO'] == 'SI')].copy()
         else:
@@ -516,18 +579,14 @@ if not df_cat.empty:
         if df_hist_mant.empty:
             st.info("ℹ️ No hay registros de mantenimientos finalizados para esta matriz en los formularios.")
         else:
-            # Ordenar cronológicamente para calcular la diferencia de golpes correctamente
             df_hist_mant = df_hist_mant.sort_values('FECHA_DT')
             historial_data = []
-            
-            # Fecha base inicial (según la fecha de tu consulta SQL)
             fecha_anterior = pd.to_datetime("2025-01-01") 
 
             for _, row in df_hist_mant.iterrows():
                 fecha_mant = row['FECHA_DT']
                 tipo_mant = row['TIPO_MANT']
 
-                # Calcular golpes acumulados entre el mantenimiento anterior y el actual
                 if not df_sql.empty:
                     df_golpes = df_sql[(df_sql['SQL_KEY'] == s_key) & 
                                        (df_sql['FECHA'] > fecha_anterior) & 
@@ -537,19 +596,54 @@ if not df_cat.empty:
                     golpes_acumulados = 0
 
                 historial_data.append({
+                    "Exportar": True, # Agregamos una columna booleana por defecto en True
                     "Fecha de Mantenimiento": fecha_mant.strftime('%d/%m/%Y'),
                     "Tipo de Mantenimiento": "🔧 Preventivo" if tipo_mant == "PREV" else "🛠️ Correctivo",
                     "Golpes al momento (Desde mant. anterior)": f"{int(golpes_acumulados):,}".replace(',', '.')
                 })
 
-                # Actualizar la fecha anterior para el próximo ciclo
                 fecha_anterior = fecha_mant
 
-            # Mostrar el resultado en una tabla limpia
             df_hist_mostrar = pd.DataFrame(historial_data)
-            st.dataframe(df_hist_mostrar, use_container_width=True, hide_index=True)
             
-            # (Opcional) Mostrar métrica rápida de estado actual
+            st.write("📝 **Selecciona qué registros quieres incluir en el PDF a exportar:**")
+            
+            # Usamos st.data_editor para permitir al usuario seleccionar/deseleccionar filas
+            df_editado = st.data_editor(
+                df_hist_mostrar,
+                column_config={
+                    "Exportar": st.column_config.CheckboxColumn(
+                        "Exportar al PDF",
+                        help="Marca o desmarca para incluir esta fila en el documento PDF",
+                        default=True,
+                    )
+                },
+                disabled=["Fecha de Mantenimiento", "Tipo de Mantenimiento", "Golpes al momento (Desde mant. anterior)"],
+                hide_index=True,
+                use_container_width=True
+            )
+
+            # Filtramos solo las filas que el usuario dejó marcadas
+            df_a_exportar = df_editado[df_editado["Exportar"] == True].copy()
+            
+            # Botón para generar y descargar PDF
+            if not df_a_exportar.empty:
+                pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar)
+                
+                # Formateo del nombre de archivo seguro
+                nombre_seguro = "".join(c for c in s_key if c.isalnum() or c in ('-', '_')).strip()
+                fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
+                
+                st.download_button(
+                    label="📥 Exportar Historial Seleccionado a PDF",
+                    data=pdf_hist_data,
+                    file_name=f"Historial_{nombre_seguro}_{fecha_str}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+            else:
+                st.warning("⚠️ Debes seleccionar al menos una fila para poder exportar el PDF.")
+                
             if not df_sql.empty:
                 golpes_actuales = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] > fecha_anterior)]['GOLPES'].sum()
                 st.caption(f"**Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}):** {int(golpes_actuales):,} golpes.")
