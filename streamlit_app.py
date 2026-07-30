@@ -317,7 +317,20 @@ def procesar_datos(df_cat, df_sql, df_forms):
             'COLOR': color
         })
 
-    return pd.DataFrame(res_semaforo)
+    # ---> INICIO DEL CÓDIGO NUEVO PARA ORDENAR <---
+    df_resultados = pd.DataFrame(res_semaforo)
+    
+    if not df_resultados.empty:
+        orden_colores = {"ROJO": 1, "AMARILLO": 2, "VERDE": 3}
+        df_resultados['Prioridad_Color'] = df_resultados['COLOR'].map(orden_colores)
+        
+        df_resultados = df_resultados.sort_values(
+            by=['Prioridad_Color', 'GOLPES'], 
+            ascending=[True, False]
+        ).drop(columns=['Prioridad_Color'])
+        
+    return df_resultados
+    # ---> FIN DEL CÓDIGO NUEVO PARA ORDENAR <---
 
 # ==========================================
 # 5. GENERACIÓN DEL PDF Y EXCEL
