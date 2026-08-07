@@ -108,6 +108,7 @@ def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
             
     return best_cand
 
+# ESTA ES LA FUNCIÓN CORREGIDA
 def get_best_match_sql(texto, lista_candidatos):
     if pd.isna(texto) or not str(texto).strip(): return ""
     val = clean_str(texto)
@@ -118,13 +119,15 @@ def get_best_match_sql(texto, lista_candidatos):
     valid_candidates = []
     for cand in lista_candidatos:
         c_clean = clean_str(cand)
-        if len(cand) > 6 and (c_clean in val or val in c_clean):
+        # Cambio: Convertir 'cand' a string antes de usar len() para evitar errores con float
+        if len(str(cand)) > 6 and (c_clean in val or val in c_clean):
             if "OP" in val and "OP" not in c_clean:
                 continue
             valid_candidates.append(cand)
 
     if valid_candidates:
-        valid_candidates.sort(key=len, reverse=True)
+        # Cambio: Usar una función lambda para convertir a string durante el ordenamiento
+        valid_candidates.sort(key=lambda x: len(str(x)), reverse=True)
         return valid_candidates[0]
         
     matches = difflib.get_close_matches(val, [clean_str(c) for c in lista_candidatos], n=1, cutoff=0.82)
